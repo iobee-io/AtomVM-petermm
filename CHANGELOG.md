@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added experimental ESP32 `CONFIG_AVM_MODULES_IN_RAM` to copy selected AVM-pack
   modules into RAM at load time, including startup and on-demand application modules.
   The option is disabled by default and trades RAM for workload-dependent performance.
+- Added `AVM_COMPACT_LABELS` (ESP32: `CONFIG_AVM_COMPACT_LABELS`), enabled by default.
+  Disable it to use only 32-bit label offsets without runtime width selection.
+  Host LabT generation follows this setting; 16-bit LabT chunks fall back to RAM
+  tables when compact labels are disabled.
 
 ### Changed
 - Stopped CI testing on FreeBSD 13, which has reached end of life.

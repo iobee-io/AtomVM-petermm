@@ -200,7 +200,27 @@
     | mdns_ttl_config().
 -type mdns_config() :: {mdns, [mdns_config_property()]}.
 
--type network_config() :: [sta_config() | ap_config() | sntp_config() | mdns_config()].
+-type eth_rmii_clock_config() :: {rmii_clock, {in, 0} | {out, 0 | 16 | 17}}.
+%% `eth_rmii_clock_config()' `{out, Gpio}' when the ESP32 feeds the PHY's 50 MHz RMII clock,
+%% `{in, 0}' (the default) when the PHY or an oscillator feeds the ESP32.
+-type eth_config_property() ::
+    {mdc, non_neg_integer()}
+    | {mdio, non_neg_integer()}
+    | eth_rmii_clock_config()
+    | {power_pin, non_neg_integer()}
+    | {phy_addr, non_neg_integer()}
+    | dhcp_hostname_config()
+    | {connected, fun(() -> term())}
+    | {disconnected, fun(() -> term())}
+    | {got_ip, fun((ip_info()) -> term())}.
+%% `eth_config_property()' ESP32 EMAC with a generic RMII PHY (LAN8720, JL1101, IP101...).
+%% `mdc' and `mdio' default to 23 and 18; `power_pin', if set, is driven high before the PHY is
+%% probed; `phy_addr' defaults to the first PHY found.
+-type eth_config() :: {eth, [eth_config_property()]}.
+
+-type network_config() :: [
+    sta_config() | ap_config() | eth_config() | sntp_config() | mdns_config()
+].
 
 -type dbm() :: integer().
 %% `dbm()' decibel-milliwatts (or dBm) will typically be a negative number, but in the presence of
@@ -796,6 +816,15 @@ handle_info({Ref, {sta_got_ip, IpInfo}} = _Msg, #state{ref = Ref, config = Confi
     State1 = State0#state{sta_ip_info = IpInfo, sta_state = connected},
     State2 = maybe_start_mdns(State1),
     {noreply, State2};
+handle_info({Ref, eth_connected} = _Msg, #state{ref = Ref, config = Config} = State) ->
+    maybe_callback0(connected, proplists:get_value(eth, Config)),
+    {noreply, State};
+handle_info({Ref, eth_disconnected} = _Msg, #state{ref = Ref, config = Config} = State) ->
+    maybe_callback0(disconnected, proplists:get_value(eth, Config)),
+    {noreply, State};
+handle_info({Ref, {eth_got_ip, IpInfo}} = _Msg, #state{ref = Ref, config = Config} = State) ->
+    maybe_callback1({got_ip, IpInfo}, proplists:get_value(eth, Config)),
+    {noreply, State};
 handle_info({Ref, ap_started} = _Msg, #state{ref = Ref, config = Config} = State) ->
     maybe_ap_started_callback(Config),
     {noreply, State};

@@ -50,6 +50,14 @@
 #include <esp_sntp.h>
 #include <esp_wifi.h>
 #include <lwip/inet.h>
+#ifdef CONFIG_ETH_USE_ESP32_EMAC
+#include <driver/gpio.h>
+#include <esp_eth.h>
+#ifdef CONFIG_SPIRAM
+#include <esp_psram.h>
+#endif
+#define HAVE_ETH 1
+#endif
 #pragma GCC diagnostic pop
 
 #include <stdint.h>
@@ -99,6 +107,24 @@ static const char *const sta_beacon_timeout_atom = ATOM_STR("\x12", "sta_beacon_
 static const char *const sta_disconnected_atom = ATOM_STR("\x10", "sta_disconnected");
 static const char *const sta_got_ip_atom = ATOM_STR("\xA", "sta_got_ip");
 static const char *const network_down_atom = ATOM_STR("\x0C", "network_down");
+#ifdef HAVE_ETH
+static const char *const eth_atom = ATOM_STR("\x3", "eth");
+static const char *const eth_connected_atom = ATOM_STR("\xD", "eth_connected");
+static const char *const eth_disconnected_atom = ATOM_STR("\x10", "eth_disconnected");
+static const char *const eth_got_ip_atom = ATOM_STR("\xA", "eth_got_ip");
+static const char *const mdc_atom = ATOM_STR("\x3", "mdc");
+static const char *const mdio_atom = ATOM_STR("\x4", "mdio");
+static const char *const phy_addr_atom = ATOM_STR("\x8", "phy_addr");
+static const char *const power_pin_atom = ATOM_STR("\x9", "power_pin");
+static const char *const rmii_clock_atom = ATOM_STR("\xA", "rmii_clock");
+static const char *const in_atom = ATOM_STR("\x2", "in");
+static const char *const out_atom = ATOM_STR("\x3", "out");
+
+// The one Ethernet interface: the ESP32 has a single EMAC.
+static esp_eth_handle_t eth_handle = NULL;
+static esp_eth_netif_glue_handle_t eth_glue = NULL;
+static esp_netif_t *eth_netif = NULL;
+#endif
 
 ESP_EVENT_DECLARE_BASE(sntp_event_base);
 ESP_EVENT_DEFINE_BASE(sntp_event_base);
@@ -430,7 +456,7 @@ static void send_term(Heap *heap, struct ClientData *data, term t)
     port_send_message_from_task(data->global, term_from_local_process_id(data->owner_process_id), msg);
 }
 
-static void send_got_ip(struct ClientData *data, esp_netif_ip_info_t *info)
+static void send_got_ip(struct ClientData *data, esp_netif_ip_info_t *info, AtomString got_ip_atom)
 {
     TRACE("Sending got_ip back to AtomVM\n");
 
@@ -442,7 +468,7 @@ static void send_got_ip(struct ClientData *data, esp_netif_ip_info_t *info)
         term gw = tuple_from_addr(&heap, ntohl(info->gw.addr));
 
         term ip_info = port_heap_create_tuple3(&heap, ip, netmask, gw);
-        term reply = port_heap_create_tuple2(&heap, make_atom(data->global, sta_got_ip_atom), ip_info);
+        term reply = port_heap_create_tuple2(&heap, make_atom(data->global, got_ip_atom), ip_info);
         send_term(&heap, data, reply);
     }
     END_WITH_STACK_HEAP(heap, data->global);
@@ -483,6 +509,20 @@ static void send_sta_disconnected(struct ClientData *data)
     }
     END_WITH_STACK_HEAP(heap, data->global);
 }
+
+#ifdef HAVE_ETH
+static void send_eth_event(struct ClientData *data, AtomString event_atom)
+{
+    TRACE("Sending eth event back to AtomVM\n");
+
+    // {Ref, eth_connected | eth_disconnected}
+    BEGIN_WITH_STACK_HEAP(PORT_REPLY_SIZE, heap);
+    {
+        send_term(&heap, data, make_atom(data->global, event_atom));
+    }
+    END_WITH_STACK_HEAP(heap, data->global);
+}
+#endif
 
 static void send_ap_started(struct ClientData *data)
 {
@@ -836,9 +876,19 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
                 // we restart sntp here for faster time sync (especially evident on coldboots)
                 // the sntp_restart is no-op if sntp isn't configured
                 esp_sntp_restart();
-                send_got_ip(data, (esp_netif_ip_info_t *) &event->ip_info.ip);
+                send_got_ip(data, (esp_netif_ip_info_t *) &event->ip_info.ip, sta_got_ip_atom);
                 break;
             }
+
+#ifdef HAVE_ETH
+            case IP_EVENT_ETH_GOT_IP: {
+                ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+                ESP_LOGI(TAG, "IP_EVENT_ETH_GOT_IP: %s", inet_ntoa(event->ip_info.ip));
+                esp_sntp_restart();
+                send_got_ip(data, (esp_netif_ip_info_t *) &event->ip_info.ip, eth_got_ip_atom);
+                break;
+            }
+#endif
 
             case IP_EVENT_AP_STAIPASSIGNED: {
                 ip_event_ap_staipassigned_t *event = (ip_event_ap_staipassigned_t *) event_data;
@@ -851,6 +901,28 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
                 ESP_LOGI(TAG, "Unhandled ip event: %" PRIi32 ".", event_id);
                 break;
         }
+#ifdef HAVE_ETH
+    } else if (event_base == ETH_EVENT) {
+
+        switch (event_id) {
+
+            case ETHERNET_EVENT_CONNECTED: {
+                ESP_LOGI(TAG, "ETHERNET_EVENT_CONNECTED received.");
+                send_eth_event(data, eth_connected_atom);
+                break;
+            }
+
+            case ETHERNET_EVENT_DISCONNECTED: {
+                ESP_LOGI(TAG, "ETHERNET_EVENT_DISCONNECTED received.");
+                send_eth_event(data, eth_disconnected_atom);
+                break;
+            }
+
+            default:
+                ESP_LOGD(TAG, "Unhandled eth event: %" PRIi32 ".", event_id);
+                break;
+        }
+#endif
     } else if (event_base == sntp_event_base) {
 
         switch (event_id) {
@@ -1182,6 +1254,272 @@ static void set_dhcp_hostname(esp_netif_t *interface, const char *interface_name
     }
 }
 
+#ifdef HAVE_ETH
+static int eth_config_int(term eth_config, AtomString key, int default_value, GlobalContext *global)
+{
+    term value = interop_kv_get_value(eth_config, key, global);
+    return term_is_integer(value) ? term_to_int(value) : default_value;
+}
+
+// Starts the ESP32 EMAC with a generic (IEEE 802.3) RMII PHY, e.g. LAN8720 or JL1101:
+//
+//   {eth, [{mdc, 23}, {mdio, 18}, {rmii_clock, {out, 17}}, {power_pin, 0},
+//          {phy_addr, 0}, {dhcp_hostname, "name"}]}
+//
+// rmii_clock is {out, 0 | 16 | 17} when the ESP32 feeds the PHY, {in, 0} (the default) when the
+// PHY or an oscillator feeds the ESP32. power_pin, if set, is driven high before the PHY is
+// probed. phy_addr defaults to the first PHY found. On failure, replies to the caller and returns
+// false.
+static bool start_eth(Context *ctx, term pid, term ref, struct ClientData *data, term eth_config)
+{
+    GlobalContext *global = ctx->global;
+    esp_err_t err = ESP_OK;
+    esp_eth_mac_t *mac = NULL;
+    esp_eth_phy_t *phy = NULL;
+
+    int power_pin = eth_config_int(eth_config, power_pin_atom, -1, global);
+    if (power_pin >= 0) {
+        gpio_reset_pin(power_pin);
+        gpio_set_direction(power_pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(power_pin, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    emac_config.smi_gpio.mdc_num = eth_config_int(eth_config, mdc_atom, 23, global);
+    emac_config.smi_gpio.mdio_num = eth_config_int(eth_config, mdio_atom, 18, global);
+    term clock = interop_kv_get_value(eth_config, rmii_clock_atom, global);
+    if (term_is_tuple(clock) && term_get_tuple_arity(clock) == 2 && term_is_integer(term_get_tuple_element(clock, 1))) {
+        term direction = term_get_tuple_element(clock, 0);
+        if (direction == make_atom(global, out_atom)) {
+            emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
+        } else if (direction == make_atom(global, in_atom)) {
+            emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
+        } else {
+            err = ESP_ERR_INVALID_ARG;
+            goto error;
+        }
+        emac_config.clock_config.rmii.clock_gpio = term_to_int(term_get_tuple_element(clock, 1));
+#ifdef CONFIG_SPIRAM
+        // GPIO16 and GPIO17 are the PSRAM's on WROVER modules: a 50 MHz clock there takes it down.
+        if (emac_config.clock_config.rmii.clock_mode == EMAC_CLK_OUT && emac_config.clock_config.rmii.clock_gpio != 0
+            && esp_psram_is_initialized()) {
+            ESP_LOGE(TAG, "RMII clock out on GPIO%d would clash with the PSRAM", emac_config.clock_config.rmii.clock_gpio);
+            err = ESP_ERR_NOT_SUPPORTED;
+            goto error;
+        }
+#endif
+    } else if (!term_is_invalid_term(clock)) {
+        err = ESP_ERR_INVALID_ARG;
+        goto error;
+    }
+
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = eth_config_int(eth_config, phy_addr_atom, ESP_ETH_PHY_ADDR_AUTO, global);
+    phy_config.reset_gpio_num = -1;
+    phy = esp_eth_phy_new_generic(&phy_config);
+    if (IS_NULL_PTR(mac) || IS_NULL_PTR(phy)) {
+        err = ESP_ERR_NO_MEM;
+        goto error;
+    }
+
+    esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
+    if ((err = esp_eth_driver_install(&config, &eth_handle)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install the Ethernet driver (no PHY?), reason: %s", esp_err_to_name(err));
+        goto error;
+    }
+
+    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    eth_netif = esp_netif_new(&netif_config);
+    eth_glue = esp_eth_new_netif_glue(eth_handle);
+    if (IS_NULL_PTR(eth_netif) || IS_NULL_PTR(eth_glue)) {
+        err = ESP_ERR_NO_MEM;
+        goto error;
+    }
+    if ((err = esp_netif_attach(eth_netif, eth_glue)) != ESP_OK
+        || (err = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &event_handler, data)) != ESP_OK
+        || (err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &event_handler, data)) != ESP_OK) {
+        goto error;
+    }
+    set_dhcp_hostname(eth_netif, "ETH", interop_kv_get_value(eth_config, dhcp_hostname_atom, global));
+    if ((err = esp_eth_start(eth_handle)) != ESP_OK) {
+        goto error;
+    }
+    ESP_LOGI(TAG, "ETH started");
+    return true;
+
+error:
+    ESP_LOGE(TAG, "Failed to start Ethernet, reason: %s", esp_err_to_name(err));
+    if (eth_handle == NULL) {
+        if (mac != NULL) {
+            mac->del(mac);
+        }
+        if (phy != NULL) {
+            phy->del(phy);
+        }
+        if (power_pin >= 0) {
+            gpio_reset_pin(power_pin);
+        }
+    }
+    port_send_reply(ctx, pid, ref, port_create_error_tuple(ctx, term_from_int(err)));
+    return false;
+}
+
+static void stop_eth(void)
+{
+    esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, &event_handler);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, &event_handler);
+    if (eth_handle != NULL) {
+        esp_eth_stop(eth_handle);
+    }
+    if (eth_glue != NULL) {
+        esp_eth_del_netif_glue(eth_glue);
+        eth_glue = NULL;
+    }
+    if (eth_netif != NULL) {
+        esp_netif_destroy(eth_netif);
+        eth_netif = NULL;
+    }
+    if (eth_handle != NULL) {
+        esp_eth_mac_t *mac = NULL;
+        esp_eth_phy_t *phy = NULL;
+        esp_eth_get_mac_instance(eth_handle, &mac);
+        esp_eth_get_phy_instance(eth_handle, &phy);
+        if (esp_eth_driver_uninstall(eth_handle) == ESP_OK) {
+            mac->del(mac);
+            phy->del(phy);
+        }
+        eth_handle = NULL;
+    }
+}
+#endif
+
+// Starts the WiFi interfaces in sta_wifi_config and ap_wifi_config. On failure, replies to the
+// caller and returns false.
+static bool start_wifi(Context *ctx, term pid, term ref, struct ClientData *data,
+    wifi_config_t *sta_wifi_config, wifi_config_t *ap_wifi_config, bool roaming,
+    esp_netif_t **sta_wifi_interface, esp_netif_t **ap_wifi_interface)
+{
+    if ((sta_wifi_config != NULL) || (roaming)) {
+        *sta_wifi_interface = esp_netif_create_default_wifi_sta();
+        if (IS_NULL_PTR(*sta_wifi_interface)) {
+            ESP_LOGE(TAG, "Failed to create network STA interface");
+            term error = port_create_error_tuple(ctx, ERROR_ATOM);
+            port_send_reply(ctx, pid, ref, error);
+            return false;
+        }
+    }
+    if (ap_wifi_config != NULL) {
+        *ap_wifi_interface = esp_netif_create_default_wifi_ap();
+        if (IS_NULL_PTR(*ap_wifi_interface)) {
+            ESP_LOGE(TAG, "Failed to create network AP interface");
+            term error = port_create_error_tuple(ctx, ERROR_ATOM);
+            port_send_reply(ctx, pid, ref, error);
+            return false;
+        }
+    }
+
+    esp_err_t err;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    if (UNLIKELY_NOT_ESP_OK(err = esp_wifi_init(&cfg))) {
+        ESP_LOGE(TAG, "Failed to initialize ESP WiFi, reason: %s", esp_err_to_name(err));
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    }
+    if (UNLIKELY((err = esp_wifi_set_storage(WIFI_STORAGE_FLASH)) != ESP_OK)) {
+        ESP_LOGE(TAG, "Failed to set ESP WiFi storage, reason: %s", esp_err_to_name(err));
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    }
+
+    if ((err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, data)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register wifi event handler, reason: %s", esp_err_to_name(err));
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    }
+
+    if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, data)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register got_ip event handler");
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    }
+    if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &event_handler, data)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register staipassigned event handler");
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    }
+
+    //
+    // Set the wifi mode
+    //
+    wifi_mode_t wifi_mode = WIFI_MODE_NULL;
+    if ((!IS_NULL_PTR(sta_wifi_config) || (roaming)) && !IS_NULL_PTR(ap_wifi_config)) {
+        wifi_mode = WIFI_MODE_APSTA;
+    } else if (!IS_NULL_PTR(ap_wifi_config)) {
+        wifi_mode = WIFI_MODE_AP;
+    } else {
+        wifi_mode = WIFI_MODE_STA;
+    }
+
+    if ((err = esp_wifi_set_mode(wifi_mode)) != ESP_OK) {
+        ESP_LOGE(TAG, "Error setting wifi mode %d", err);
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    } else {
+        ESP_LOGI(TAG, "WIFI mode set to %d", wifi_mode);
+    }
+
+    //
+    // Set up STA mode, if configured
+    //
+    if (!IS_NULL_PTR(sta_wifi_config)) {
+        if ((err = esp_wifi_set_config(WIFI_IF_STA, sta_wifi_config)) != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting STA mode config %d", err);
+            term error = port_create_error_tuple(ctx, term_from_int(err));
+            port_send_reply(ctx, pid, ref, error);
+            return false;
+        } else {
+            ESP_LOGI(TAG, "STA mode configured");
+        }
+    }
+
+    //
+    // Set up AP mode, if configured
+    //
+    if (!IS_NULL_PTR(ap_wifi_config)) {
+        if ((err = esp_wifi_set_config(WIFI_IF_AP, ap_wifi_config)) != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting AP mode config %d", err);
+            term error = port_create_error_tuple(ctx, term_from_int(err));
+            port_send_reply(ctx, pid, ref, error);
+            return false;
+        } else {
+            ESP_LOGI(TAG, "AP mode configured");
+        }
+    }
+
+    //
+    // Start the configured interface(s)
+    //
+    if ((err = esp_wifi_start()) != ESP_OK) {
+        ESP_LOGE(TAG, "Error in esp_wifi_start %d", err);
+        term error = port_create_error_tuple(ctx, term_from_int(err));
+        port_send_reply(ctx, pid, ref, error);
+        return false;
+    } else {
+        ESP_LOGI(TAG, "WIFI started");
+    }
+
+    return true;
+}
+
 static void start_network(Context *ctx, term pid, term ref, term config)
 {
     TRACE("start_network\n");
@@ -1198,8 +1536,14 @@ static void start_network(Context *ctx, term pid, term ref, term config)
     //
     term sta_config = interop_kv_get_value_default(config, sta_atom, term_invalid_term(), ctx->global);
     term ap_config = interop_kv_get_value_default(config, ap_atom, term_invalid_term(), ctx->global);
-    if (UNLIKELY(term_is_invalid_term(sta_config) && term_is_invalid_term(ap_config))) {
-        ESP_LOGE(TAG, "Expected STA or AP configuration but got neither");
+#ifdef HAVE_ETH
+    term eth_config = interop_kv_get_value_default(config, eth_atom, term_invalid_term(), ctx->global);
+#else
+    term eth_config = term_invalid_term();
+#endif
+    bool want_wifi = !term_is_invalid_term(sta_config) || !term_is_invalid_term(ap_config);
+    if (UNLIKELY(!want_wifi && term_is_invalid_term(eth_config))) {
+        ESP_LOGE(TAG, "Expected STA, AP or ETH configuration but got none");
         term error = port_create_error_tuple(ctx, BADARG_ATOM);
         port_send_reply(ctx, pid, ref, error);
         return;
@@ -1213,7 +1557,7 @@ static void start_network(Context *ctx, term pid, term ref, term config)
 
     wifi_config_t *sta_wifi_config = get_sta_wifi_config(sta_config, ctx->global);
     wifi_config_t *ap_wifi_config = get_ap_wifi_config(ap_config, ctx->global);
-    if ((!roaming) && IS_NULL_PTR(sta_wifi_config) && IS_NULL_PTR(ap_wifi_config)) {
+    if (want_wifi && (!roaming) && IS_NULL_PTR(sta_wifi_config) && IS_NULL_PTR(ap_wifi_config)) {
         ESP_LOGE(TAG, "Unable to get STA or AP configuration");
         term error = port_create_error_tuple(ctx, BADARG_ATOM);
         port_send_reply(ctx, pid, ref, error);
@@ -1236,60 +1580,12 @@ static void start_network(Context *ctx, term pid, term ref, term config)
     platform->network_driver_data = data;
 
     esp_netif_t *sta_wifi_interface = NULL;
-    if ((sta_wifi_config != NULL) || (roaming)) {
-        sta_wifi_interface = esp_netif_create_default_wifi_sta();
-        if (IS_NULL_PTR(sta_wifi_interface)) {
-            ESP_LOGE(TAG, "Failed to create network STA interface");
-            term error = port_create_error_tuple(ctx, ERROR_ATOM);
-            port_send_reply(ctx, pid, ref, error);
-            goto cleanup;
-        }
-    }
     esp_netif_t *ap_wifi_interface = NULL;
-    if (ap_wifi_config != NULL) {
-        ap_wifi_interface = esp_netif_create_default_wifi_ap();
-        if (IS_NULL_PTR(ap_wifi_interface)) {
-            ESP_LOGE(TAG, "Failed to create network AP interface");
-            term error = port_create_error_tuple(ctx, ERROR_ATOM);
-            port_send_reply(ctx, pid, ref, error);
-            goto cleanup;
-        }
+    if (want_wifi && !start_wifi(ctx, pid, ref, data, sta_wifi_config, ap_wifi_config, roaming, &sta_wifi_interface, &ap_wifi_interface)) {
+        goto cleanup;
     }
 
     esp_err_t err;
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    if (UNLIKELY_NOT_ESP_OK(err = esp_wifi_init(&cfg))) {
-        ESP_LOGE(TAG, "Failed to initialize ESP WiFi, reason: %s", esp_err_to_name(err));
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    }
-    if (UNLIKELY((err = esp_wifi_set_storage(WIFI_STORAGE_FLASH)) != ESP_OK)) {
-        ESP_LOGE(TAG, "Failed to set ESP WiFi storage, reason: %s", esp_err_to_name(err));
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    }
-
-    if ((err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, data)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register wifi event handler, reason: %s", esp_err_to_name(err));
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    }
-
-    if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, data)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register got_ip event handler");
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    }
-    if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &event_handler, data)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register staipassigned event handler");
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    }
     if ((err = esp_event_handler_register(sntp_event_base, SNTP_EVENT_BASE_SYNC, &event_handler, data)) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register sntp event handler");
         term error = port_create_error_tuple(ctx, term_from_int(err));
@@ -1297,66 +1593,11 @@ static void start_network(Context *ctx, term pid, term ref, term config)
         goto cleanup;
     }
 
-    //
-    // Set the wifi mode
-    //
-    wifi_mode_t wifi_mode = WIFI_MODE_NULL;
-    if ((!IS_NULL_PTR(sta_wifi_config) || (roaming)) && !IS_NULL_PTR(ap_wifi_config)) {
-        wifi_mode = WIFI_MODE_APSTA;
-    } else if (!IS_NULL_PTR(ap_wifi_config)) {
-        wifi_mode = WIFI_MODE_AP;
-    } else {
-        wifi_mode = WIFI_MODE_STA;
-    }
-
-    if ((err = esp_wifi_set_mode(wifi_mode)) != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting wifi mode %d", err);
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
+#ifdef HAVE_ETH
+    if (!term_is_invalid_term(eth_config) && !start_eth(ctx, pid, ref, data, eth_config)) {
         goto cleanup;
-    } else {
-        ESP_LOGI(TAG, "WIFI mode set to %d", wifi_mode);
     }
-
-    //
-    // Set up STA mode, if configured
-    //
-    if (!IS_NULL_PTR(sta_wifi_config)) {
-        if ((err = esp_wifi_set_config(WIFI_IF_STA, sta_wifi_config)) != ESP_OK) {
-            ESP_LOGE(TAG, "Error setting STA mode config %d", err);
-            term error = port_create_error_tuple(ctx, term_from_int(err));
-            port_send_reply(ctx, pid, ref, error);
-            goto cleanup;
-        } else {
-            ESP_LOGI(TAG, "STA mode configured");
-        }
-    }
-
-    //
-    // Set up AP mode, if configured
-    //
-    if (!IS_NULL_PTR(ap_wifi_config)) {
-        if ((err = esp_wifi_set_config(WIFI_IF_AP, ap_wifi_config)) != ESP_OK) {
-            ESP_LOGE(TAG, "Error setting AP mode config %d", err);
-            term error = port_create_error_tuple(ctx, term_from_int(err));
-            port_send_reply(ctx, pid, ref, error);
-            goto cleanup;
-        } else {
-            ESP_LOGI(TAG, "AP mode configured");
-        }
-    }
-
-    //
-    // Start the configured interface(s)
-    //
-    if ((err = esp_wifi_start()) != ESP_OK) {
-        ESP_LOGE(TAG, "Error in esp_wifi_start %d", err);
-        term error = port_create_error_tuple(ctx, term_from_int(err));
-        port_send_reply(ctx, pid, ref, error);
-        goto cleanup;
-    } else {
-        ESP_LOGI(TAG, "WIFI started");
-    }
+#endif
 
     //
     // Set up simple NTP, if configured
@@ -1395,6 +1636,9 @@ static void stop_network(GlobalContext *global)
     esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler);
     esp_event_handler_unregister(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &event_handler);
     esp_event_handler_unregister(sntp_event_base, SNTP_EVENT_BASE_SYNC, &event_handler);
+#ifdef HAVE_ETH
+    stop_eth();
+#endif
 
     esp_netif_t *sta_wifi_interface = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_t *ap_wifi_interface = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");

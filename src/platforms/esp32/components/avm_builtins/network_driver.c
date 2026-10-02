@@ -54,6 +54,7 @@
 #include <driver/gpio.h>
 #include <esp_eth.h>
 #ifdef CONFIG_SPIRAM
+#include <esp_private/esp_gpio_reserve.h>
 #include <esp_psram.h>
 #endif
 #define HAVE_ETH 1
@@ -1309,11 +1310,14 @@ static bool start_eth(Context *ctx, term pid, term ref, struct ClientData *data,
         emac_config.clock_config.rmii.clock_gpio = term_to_int(term_get_tuple_element(clock, 1));
 #ifdef CONFIG_SPIRAM
         // GPIO16 and GPIO17 are the PSRAM's on WROVER modules: a 50 MHz clock there takes it down.
-        if (emac_config.clock_config.rmii.clock_mode == EMAC_CLK_OUT && emac_config.clock_config.rmii.clock_gpio != 0
-            && esp_psram_is_initialized()) {
-            ESP_LOGE(TAG, "RMII clock out on GPIO%d would clash with the PSRAM", emac_config.clock_config.rmii.clock_gpio);
-            err = ESP_ERR_NOT_SUPPORTED;
-            goto error;
+        // Without a PSRAM chip, its failed init still holds them reserved: release the clock pin.
+        if (emac_config.clock_config.rmii.clock_mode == EMAC_CLK_OUT && emac_config.clock_config.rmii.clock_gpio != 0) {
+            if (esp_psram_is_initialized()) {
+                ESP_LOGE(TAG, "RMII clock out on GPIO%d would clash with the PSRAM", emac_config.clock_config.rmii.clock_gpio);
+                err = ESP_ERR_NOT_SUPPORTED;
+                goto error;
+            }
+            esp_gpio_revoke(BIT64(emac_config.clock_config.rmii.clock_gpio));
         }
 #endif
     } else if (!term_is_invalid_term(clock)) {

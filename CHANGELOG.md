@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `AVM_COMPACT_ATOM_INDICES` (ESP32: `CONFIG_AVM_COMPACT_ATOM_INDICES`),
   enabled by default. Disable it to use 32-bit atom indices and support more than
   65535 atoms while retaining indexed tables and generated default-atom lookups.
+- Added opt-in experimental `AVM_STATIC_LIBRARY_ATOMS` (ESP32:
+  `CONFIG_AVM_STATIC_LIBRARY_ATOMS`) to reserve module-name atoms from a prebuilt
+  boot archive. Flash placement avoids dynamic atom entries for these names;
+  RAM-default builds copy them at startup. Existing builtin IDs are unchanged.
+  Registered names count as existing atoms before their modules load.
 
 ### Changed
 - Stopped CI testing on FreeBSD 13, which has reached end of life.

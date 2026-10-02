@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot archive. Flash placement avoids dynamic atom entries for these names;
   RAM-default builds copy them at startup. Existing builtin IDs are unchanged.
   Registered names count as existing atoms before their modules load.
+- Added opt-in `AVM_STATIC_LIBRARY_ALL_ATOMS` (ESP32:
+  `CONFIG_AVM_STATIC_LIBRARY_ALL_ATOMS`) to extend the experimental static
+  registry to all selected boot-library atom-chunk names, not just module names.
+  Requires `AVM_STATIC_LIBRARY_ATOMS`; both options remain disabled by default.
 
 ### Changed
 - Stopped CI testing on FreeBSD 13, which has reached end of life.

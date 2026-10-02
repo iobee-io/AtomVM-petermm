@@ -1331,7 +1331,11 @@ static bool start_eth(Context *ctx, term pid, term ref, struct ClientData *data,
         goto error;
     }
 
-    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    // A cable, when there is one, carries the traffic: over the STA's 100, which the default 50
+    // would lose to.
+    esp_netif_inherent_config_t netif_base = ESP_NETIF_INHERENT_DEFAULT_ETH();
+    netif_base.route_prio = 128;
+    esp_netif_config_t netif_config = { .base = &netif_base, .driver = NULL, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH };
     eth_netif = esp_netif_new(&netif_config);
     eth_glue = esp_eth_new_netif_glue(eth_handle);
     if (IS_NULL_PTR(eth_netif) || IS_NULL_PTR(eth_glue)) {

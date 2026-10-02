@@ -112,6 +112,7 @@ static const char *const eth_atom = ATOM_STR("\x3", "eth");
 static const char *const eth_connected_atom = ATOM_STR("\xD", "eth_connected");
 static const char *const eth_disconnected_atom = ATOM_STR("\x10", "eth_disconnected");
 static const char *const eth_got_ip_atom = ATOM_STR("\xA", "eth_got_ip");
+static const char *const eth_started_atom = ATOM_STR("\xB", "eth_started");
 static const char *const mdc_atom = ATOM_STR("\x3", "mdc");
 static const char *const mdio_atom = ATOM_STR("\x4", "mdio");
 static const char *const phy_addr_atom = ATOM_STR("\x8", "phy_addr");
@@ -515,7 +516,7 @@ static void send_eth_event(struct ClientData *data, AtomString event_atom)
 {
     TRACE("Sending eth event back to AtomVM\n");
 
-    // {Ref, eth_connected | eth_disconnected}
+    // {Ref, eth_started | eth_connected | eth_disconnected}
     BEGIN_WITH_STACK_HEAP(PORT_REPLY_SIZE, heap);
     {
         send_term(&heap, data, make_atom(data->global, event_atom));
@@ -905,6 +906,12 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     } else if (event_base == ETH_EVENT) {
 
         switch (event_id) {
+
+            case ETHERNET_EVENT_START: {
+                ESP_LOGI(TAG, "ETHERNET_EVENT_START received.");
+                send_eth_event(data, eth_started_atom);
+                break;
+            }
 
             case ETHERNET_EVENT_CONNECTED: {
                 ESP_LOGI(TAG, "ETHERNET_EVENT_CONNECTED received.");

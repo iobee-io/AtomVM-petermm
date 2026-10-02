@@ -210,12 +210,14 @@
     | {power_pin, non_neg_integer()}
     | {phy_addr, non_neg_integer()}
     | dhcp_hostname_config()
+    | {started, fun(() -> term())}
     | {connected, fun(() -> term())}
     | {disconnected, fun(() -> term())}
     | {got_ip, fun((ip_info()) -> term())}.
 %% `eth_config_property()' ESP32 EMAC with a generic RMII PHY (LAN8720, JL1101, IP101...).
 %% `mdc' and `mdio' default to 23 and 18; `power_pin', if set, is driven high before the PHY is
-%% probed; `phy_addr' defaults to the first PHY found.
+%% probed; `phy_addr' defaults to the first PHY found. `started' runs once the PHY answered and
+%% the interface is up, with or without a cable.
 -type eth_config() :: {eth, [eth_config_property()]}.
 
 -type network_config() :: [
@@ -816,6 +818,9 @@ handle_info({Ref, {sta_got_ip, IpInfo}} = _Msg, #state{ref = Ref, config = Confi
     State1 = State0#state{sta_ip_info = IpInfo, sta_state = connected},
     State2 = maybe_start_mdns(State1),
     {noreply, State2};
+handle_info({Ref, eth_started} = _Msg, #state{ref = Ref, config = Config} = State) ->
+    maybe_callback0(started, proplists:get_value(eth, Config)),
+    {noreply, State};
 handle_info({Ref, eth_connected} = _Msg, #state{ref = Ref, config = Config} = State) ->
     maybe_callback0(connected, proplists:get_value(eth, Config)),
     {noreply, State};

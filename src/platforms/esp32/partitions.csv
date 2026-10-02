@@ -1,12 +1,38 @@
-# Copyright 2018-2021 Davide Bettio <davide@uninstall.it>
-# Copyright 2018-2021 Fred Dushin <fred@dushin.net>
+# A tabela de partições do dispositivo, em 4MB. A fonte da verdade:
+# `mix atomvm.vm` a copia por cima de AtomVM/src/platforms/esp32/partitions.csv
+# antes de compilar a VM, que a compila em partition-table.bin. Os offsets do
+# mix.exs têm de bater com ela -- gravar uma app num offset desatualizado a põe
+# dentro do boot.avm, e o único sintoma é `Failed app start: invalid_avm'.
 #
-# SPDX-License-Identifier: Apache-2.0 OR LGPL-2.1-or-later
-
-# Name,   Type, SubType, Offset,  Size, Flags
-# Note: if you change the phy_init or app partition offset, make sure to change the offset in Kconfig.projbuild
-nvs,      data, nvs,       0x9000,     0x6000,
-phy_init, data, phy,       0xf000,     0x1000,
-factory,  app,  factory,  0x10000,   0x1C0000,
-boot.avm,  data, phy,     0x1D0000,    0x80000,
-main.avm, data, phy,     0x250000,   0x100000
+#   * factory tem 1984K: AVM_USE_LIBSODIUM=ON adiciona ~140K, e o driver
+#     Ethernet (EMAC + PHY genérico, para a DT-R002) passou dos 1856K.
+#   * boot.avm tem 576K: a imagem de boot Elixir tem 530.784 bytes, maior que
+#     a de uma app Erlang, e não cabe nos 512K padrão.
+#   * dois slots de packbeam, para uma atualização nunca gravar por cima do que
+#     está rodando. Têm o mesmo tamanho um do outro, já que qualquer um tem de
+#     caber o arquivo: 512K cada (a app tinha ~294K na 0.1.51). Eram 796K; o
+#     que sobrou virou...
+#   * data: 440K de FAT com wear leveling (era 568K; deu 128K à factory),
+#     montada em /data por
+#     IobeeBee.Fs.Server (formatada na primeira montagem).
+#   * identity: a identidade e o certificado do NervesHub deste dispositivo,
+#     gravados por `mix nh.provision` e lidos por IobeeBee.Config.Provisioning.
+#     Separada do NVS para que provisionar nunca mexa na escolha do slot de
+#     boot nem em nada mais guardado lá. `undefined` é o subtipo de dados do
+#     ESP-IDF para dados de aplicação.
+#
+# Um dispositivo com a tabela do agente (sem partição identity) precisa desta
+# gravada antes de poder ser provisionado: `mix atomvm.firmware`, depois
+# `mix atomvm.factory`. Um com uma versão anterior desta (slots de 796K, sem
+# data): `make repartition`, que mantém NVS e identidade. `Nh.Board` lê a
+# tabela da placa e recusa gravar slots enquanto ela não é esta.
+#
+# Name,     Type, SubType,   Offset,   Size,     Flags
+nvs,        data, nvs,       0x9000,   0x6000,
+phy_init,   data, phy,       0xf000,   0x1000,
+factory,    app,  factory,   0x10000,  0x1F0000,
+boot.avm,   data, phy,       0x200000, 0x90000,
+main.avm,   data, phy,       0x290000, 0x80000,
+alt.avm,    data, phy,       0x310000, 0x80000,
+data,       data, fat,       0x390000, 0x6E000,
+identity,   data, undefined, 0x3FE000, 0x2000,

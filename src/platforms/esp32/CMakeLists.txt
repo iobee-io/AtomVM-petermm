@@ -114,6 +114,7 @@ option(AVM_CREATE_STACKTRACES "Create stacktraces" ON)
 option(AVM_PRINT_PROCESS_CRASH_DUMPS "Print crash reports when processes die with non-standard reasons" ON)
 option(AVM_USE_LIBSODIUM "Enable optional libsodium backend for Ed25519 curve" OFF)
 option(AVM_LABT "Use pre-computed LabT flash tables for BEAM labels" OFF)
+option(AVM_COMPACT_LABELS "Use 16-bit label offsets when Code fits" ON)
 
 project(atomvm-esp32)
 

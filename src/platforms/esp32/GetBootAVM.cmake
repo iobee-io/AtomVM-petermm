@@ -25,7 +25,11 @@ set(AVM_LIB_OFFSET "${lib_offset}")
 # partitions.csv and partitions-elixir.csv use 0x250000 for main.avm (non-JIT).
 # partitions-jit.csv uses 0x300000 for main.avm (JIT: AOT boot.avm 1.375MB on 4MB flash).
 # Use ATOMVM_ELIXIR_SUPPORT to select the elixir boot library flavor.
-if ("${app_offset}" STREQUAL "0x250000")
+if ("${app_offset}" STREQUAL "0x290000")
+    # iobee experiment: our partitions.csv (identity partition) with the Elixir boot library.
+    set(BOOT_LIBS "elixir_esp32boot.avm")
+    set(ATOMVM_FLAVOR "-elixir")
+elseif ("${app_offset}" STREQUAL "0x250000")
     if (ATOMVM_ELIXIR_SUPPORT)
         set(BOOT_LIBS "elixir_esp32boot.avm")
         set(ATOMVM_FLAVOR "-elixir")

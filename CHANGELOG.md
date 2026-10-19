@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The option is disabled by default and trades RAM for workload-dependent performance.
 
 ### Fixed
+- Fixed stacktraces with no line information coming back raw on ESP32, where `malloc(0)`
+  returns `NULL`
 - Fixed maps decoded by `binary_to_term/1,2` and received over distribution keeping the
   encoder's key order, which broke `==` and made `=>` updates on an existing key produce
   duplicate keys

@@ -113,6 +113,7 @@ compile_erlang(test_mount)
 compile_erlang(test_net)
 compile_erlang(test_rtc_slow)
 compile_erlang(test_select)
+compile_erlang(test_stacktrace)
 compile_erlang(test_socket)
 compile_erlang(test_ssl)
 compile_erlang(test_system_architecture)
@@ -141,6 +142,7 @@ set(erlang_test_beams
     test_net.beam
     test_rtc_slow.beam
     test_select.beam
+    test_stacktrace.beam
     test_socket.beam
     test_ssl.beam
     test_system_architecture.beam

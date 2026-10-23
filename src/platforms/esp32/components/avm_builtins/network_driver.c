@@ -78,6 +78,7 @@
 #define PORT_REPLY_SIZE (TUPLE_SIZE(2) + TERM_BOXED_REFERENCE_SHORT_SIZE)
 
 static const char *const ap_atom = ATOM_STR("\x2", "ap");
+static const char *const ap_authmode_atom = ATOM_STR("\xB", "ap_authmode");
 static const char *const ap_channel_atom = ATOM_STR("\xA", "ap_channel");
 static const char *const ap_sta_connected_atom = ATOM_STR("\x10", "ap_sta_connected");
 static const char *const ap_sta_disconnected_atom = ATOM_STR("\x13", "ap_sta_disconnected");
@@ -1029,6 +1030,26 @@ static char *get_default_device_name(esp_mac_type_t interface)
     return buf;
 }
 
+// The modes an AP with a password can offer. WPA3 needs SAE in the SoftAP,
+// which ESP-IDF builds in unless CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT is off.
+static bool ap_authmode_from_term(GlobalContext *global, term mode_term, wifi_auth_mode_t *mode)
+{
+    if (globalcontext_is_term_equal_to_atom_string(global, mode_term, ATOM_STR("\xC", "wpa_wpa2_psk"))) {
+        *mode = WIFI_AUTH_WPA_WPA2_PSK;
+    } else if (globalcontext_is_term_equal_to_atom_string(global, mode_term, ATOM_STR("\x8", "wpa2_psk"))) {
+        *mode = WIFI_AUTH_WPA2_PSK;
+#if CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT
+    } else if (globalcontext_is_term_equal_to_atom_string(global, mode_term, ATOM_STR("\xD", "wpa2_wpa3_psk"))) {
+        *mode = WIFI_AUTH_WPA2_WPA3_PSK;
+    } else if (globalcontext_is_term_equal_to_atom_string(global, mode_term, ATOM_STR("\x8", "wpa3_psk"))) {
+        *mode = WIFI_AUTH_WPA3_PSK;
+#endif
+    } else {
+        return false;
+    }
+    return true;
+}
+
 static wifi_config_t *get_ap_wifi_config(term ap_config, GlobalContext *global)
 {
     if (term_is_invalid_term(ap_config)) {
@@ -1074,6 +1095,17 @@ static wifi_config_t *get_ap_wifi_config(term ap_config, GlobalContext *global)
     if (!term_is_invalid_term(channel_term)) {
         channel = term_to_uint8(channel_term);
     }
+    // Without a password the AP is open, whatever the mode says.
+    wifi_auth_mode_t authmode = IS_NULL_PTR(psk) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_WPA2_PSK;
+    term authmode_term = interop_kv_get_value(ap_config, ap_authmode_atom, global);
+    if (!term_is_invalid_term(authmode_term)) {
+        if (UNLIKELY(IS_NULL_PTR(psk) || !ap_authmode_from_term(global, authmode_term, &authmode))) {
+            ESP_LOGE(TAG, "get_ap_wifi_config: ap_authmode needs a psk and one of wpa_wpa2_psk, wpa2_psk, wpa2_wpa3_psk, wpa3_psk (WPA3 needs CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT)");
+            free(ssid);
+            free(psk);
+            return NULL;
+        }
+    }
 
     //
     // Allocate wifi_config and check variable sizes
@@ -1110,7 +1142,15 @@ static wifi_config_t *get_ap_wifi_config(term ap_config, GlobalContext *global)
         wifi_config->ap.channel = channel;
     }
 
-    wifi_config->ap.authmode = IS_NULL_PTR(psk) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_WPA2_PSK;
+    wifi_config->ap.authmode = authmode;
+#if CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT
+    if (authmode == WIFI_AUTH_WPA3_PSK || authmode == WIFI_AUTH_WPA2_WPA3_PSK) {
+        wifi_config->ap.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+        // WPA3 alone requires protected management frames; the mixed mode
+        // keeps them optional so WPA2 stations without them can still join.
+        wifi_config->ap.pmf_cfg.required = authmode == WIFI_AUTH_WPA3_PSK;
+    }
+#endif
     term ssid_hidden_term = interop_kv_get_value(ap_config, ssid_hidden_atom, global);
     wifi_config->ap.ssid_hidden = term_is_invalid_term(ssid_hidden_term) ? 0 : ssid_hidden_term == TRUE_ATOM;
     term max_connections_term = interop_kv_get_value(ap_config, max_connections_atom, global);

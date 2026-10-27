@@ -114,6 +114,7 @@ compile_erlang(test_mount)
 compile_erlang(test_net)
 compile_erlang(test_eth)
 compile_erlang(test_eth_teardown)
+compile_erlang(test_nvs)
 compile_erlang(test_rtc_slow)
 compile_erlang(test_select)
 compile_erlang(test_stacktrace)
@@ -147,6 +148,7 @@ set(erlang_test_beams
     test_net.beam
     test_eth.beam
     test_eth_teardown.beam
+    test_nvs.beam
     test_rtc_slow.beam
     test_select.beam
     test_stacktrace.beam

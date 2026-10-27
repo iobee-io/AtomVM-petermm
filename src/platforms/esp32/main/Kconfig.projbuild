@@ -79,6 +79,16 @@ menu "AtomVM configuration"
          help
              Enable Just in time compilation, or just execution of precompiled native code
              
+    config AVM_DISABLE_MLKEM
+        bool "Leave ML-KEM-768 out of crypto"
+        default n
+        help
+            With libsodium (AVM_USE_LIBSODIUM), crypto:encapsulate_key/2 and
+            crypto:decapsulate_key/3 offer ML-KEM-768. It takes about 52 KB
+            of flash, mostly libsodium's Keccak. Say y to leave it out on a
+            device that does not use it: those functions are then missing, as
+            in a build without libsodium.
+
     config AVM_CREATE_STACKTRACES
         bool  "Create BEAM stack traces."
         default y

@@ -2117,8 +2117,10 @@ static void start_network(Context *ctx, term pid, term ref, term config)
     }
 #endif
     bool want_wifi = !term_is_invalid_term(sta_config) || !term_is_invalid_term(ap_config);
-    if (UNLIKELY(!want_wifi && term_is_invalid_term(eth_config) && term_is_invalid_term(ppp_config))) {
-        ESP_LOGE(TAG, "Expected STA, AP, ETH or PPP configuration but got none");
+    // SNTP alone is for an interface of another driver (an ESP-NOW tunnel).
+    bool want_sntp = interop_kv_get_value_default(config, sntp_atom, term_invalid_term(), ctx->global) != term_invalid_term();
+    if (UNLIKELY(!want_wifi && term_is_invalid_term(eth_config) && term_is_invalid_term(ppp_config) && !want_sntp)) {
+        ESP_LOGE(TAG, "Expected STA, AP, ETH, PPP or SNTP configuration but got none");
         term error = port_create_error_tuple(ctx, BADARG_ATOM);
         port_send_reply(ctx, pid, ref, error);
         return;

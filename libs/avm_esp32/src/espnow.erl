@@ -33,6 +33,18 @@
 %% `{espnow, rx, Mac, Data, #{rssi := Rssi}}' for each frame, and
 %% `{espnow, sent, Mac, ok | fail}' for each `send/3': for a unicast frame
 %% `ok' means the peer acknowledged it, for a broadcast only that it went out.
+%%
+%% With `{tunnel, Role}', the port also carries IP: a netif of its own, whose
+%% Ethernet frames travel in ESP-NOW frames (ESP-NOW v2, ESP-IDF 5.4 or newer).
+%% A `gateway', on a board with a network, is 10.42.0.1/24, leases addresses
+%% to the nodes, NATs them out through its default route (it needs
+%% `CONFIG_LWIP_IPV4_NAPT') and announces itself on its channel. A `node' hops
+%% the channels until it hears a gateway, stays on its channel and asks it for
+%% an address. The receiver gets `{espnow, tunnel, {up, GatewayMac, Channel}}',
+%% `{espnow, tunnel, {got_ip, {Address, Netmask, Gateway}}}', and
+%% `{espnow, tunnel, down}' when the gateway has not been heard for 5 s (the
+%% node then hops again). Frames whose first byte is 16#A5 or 16#A6 are the
+%% tunnel's, and with a tunnel no `sent' result is reported.
 %% @end
 %%-----------------------------------------------------------------------------
 -module(espnow).
@@ -57,7 +69,8 @@
 -type open_option() ::
     {receiver, pid()}
     | {channel, channel()}
-    | {pmk, key()}.
+    | {pmk, key()}
+    | {tunnel, node | gateway}.
 %% `pmk' is the primary key that encrypts the peers' `lmk' keys.
 
 -type peer_option() :: {channel, channel()} | {lmk, key()}.

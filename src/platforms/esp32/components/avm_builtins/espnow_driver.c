@@ -45,6 +45,7 @@
 #include "esp32_sys.h"
 #include "sys.h"
 
+#include <espnow_tunnel.h>
 #include <network_wifi.h>
 
 #define TAG "espnow_driver"
@@ -60,7 +61,8 @@
 enum EspNowEventKind
 {
     EspNowReceived,
-    EspNowSent
+    EspNowSent,
+    EspNowTunnel
 };
 
 struct EspNowEvent
@@ -70,7 +72,11 @@ struct EspNowEvent
     int8_t rssi;
     uint8_t ok;
     uint8_t len;
-    uint8_t data[ESP_NOW_MAX_DATA_LEN];
+    union
+    {
+        uint8_t data[ESP_NOW_MAX_DATA_LEN];
+        struct EspNowTunnelEvent tunnel;
+    };
 };
 
 struct EspNowData
@@ -127,6 +133,9 @@ static void queue_event(const struct EspNowEvent *event)
 // Wi-Fi task.
 static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *payload, int len)
 {
+    if (espnow_tunnel_receive(info, payload, len)) {
+        return;
+    }
     struct EspNowEvent event = { .kind = EspNowReceived };
     memcpy(event.mac, info->src_addr, MAC_LEN);
     event.rssi = info->rx_ctrl->rssi;
@@ -145,11 +154,74 @@ static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_stat
 static void espnow_send_cb(const uint8_t *mac, esp_now_send_status_t status)
 {
 #endif
+    // The tunnel's frames and the application's share the radio, and the
+    // result does not say whose frame it was: with a tunnel, none is reported.
+    if (espnow_tunnel_active()) {
+        espnow_tunnel_sent(status == ESP_NOW_SEND_SUCCESS);
+        return;
+    }
     struct EspNowEvent event = { .kind = EspNowSent, .ok = status == ESP_NOW_SEND_SUCCESS };
     if (mac != NULL) {
         memcpy(event.mac, mac, MAC_LEN);
     }
     queue_event(&event);
+}
+
+// The tunnel's timer task.
+static void espnow_tunnel_event(const struct EspNowTunnelEvent *tunnel_event)
+{
+    struct EspNowEvent event = { .kind = EspNowTunnel, .tunnel = *tunnel_event };
+    queue_event(&event);
+}
+
+static term ip4_tuple(const esp_ip4_addr_t *addr, Heap *heap)
+{
+    term t = term_alloc_tuple(4, heap);
+    term_put_tuple_element(t, 0, term_from_int(esp_ip4_addr1(addr)));
+    term_put_tuple_element(t, 1, term_from_int(esp_ip4_addr2(addr)));
+    term_put_tuple_element(t, 2, term_from_int(esp_ip4_addr3(addr)));
+    term_put_tuple_element(t, 3, term_from_int(esp_ip4_addr4(addr)));
+    return t;
+}
+
+// {espnow, tunnel, {up, GatewayMac, Channel} | down | {got_ip, {Ip, Netmask, Gateway}}}
+static void send_tunnel_event(GlobalContext *glb, struct EspNowData *data, const struct EspNowTunnelEvent *event)
+{
+    size_t size = TUPLE_SIZE(3) + TUPLE_SIZE(3) + term_binary_heap_size(MAC_LEN) + TUPLE_SIZE(3) + 3 * TUPLE_SIZE(4);
+    Heap heap;
+    if (UNLIKELY(memory_init_heap(&heap, size) != MEMORY_GC_OK)) {
+        ESP_LOGE(TAG, "No memory for an event, dropped");
+        data->dropped++;
+        return;
+    }
+    term what;
+    switch (event->kind) {
+        case EspNowTunnelUp:
+            what = term_alloc_tuple(3, &heap);
+            term_put_tuple_element(what, 0, globalcontext_make_atom(glb, ATOM_STR("\x2", "up")));
+            term_put_tuple_element(what, 1, term_from_literal_binary(event->mac, MAC_LEN, &heap, glb));
+            term_put_tuple_element(what, 2, term_from_int(event->channel));
+            break;
+        case EspNowTunnelGotIp: {
+            term ip = term_alloc_tuple(3, &heap);
+            term_put_tuple_element(ip, 0, ip4_tuple(&event->ip.ip, &heap));
+            term_put_tuple_element(ip, 1, ip4_tuple(&event->ip.netmask, &heap));
+            term_put_tuple_element(ip, 2, ip4_tuple(&event->ip.gw, &heap));
+            what = term_alloc_tuple(2, &heap);
+            term_put_tuple_element(what, 0, globalcontext_make_atom(glb, ATOM_STR("\x6", "got_ip")));
+            term_put_tuple_element(what, 1, ip);
+            break;
+        }
+        default:
+            what = globalcontext_make_atom(glb, ATOM_STR("\x4", "down"));
+            break;
+    }
+    term message = term_alloc_tuple(3, &heap);
+    term_put_tuple_element(message, 0, globalcontext_make_atom(glb, ATOM_STR("\x6", "espnow")));
+    term_put_tuple_element(message, 1, globalcontext_make_atom(glb, ATOM_STR("\x6", "tunnel")));
+    term_put_tuple_element(message, 2, what);
+    globalcontext_send_message(glb, data->receiver, message);
+    memory_destroy_heap(&heap, glb);
 }
 
 // The network driver brought the radio back as a bare STA (network:stop/0):
@@ -169,6 +241,11 @@ static EventListener *espnow_event_callback(GlobalContext *glb, EventListener *l
     struct EspNowData *data = GET_LIST_ENTRY(listener, struct EspNowData, listener);
     struct EspNowEvent event;
     if (xQueueReceive(data->queue, &event, 0) != pdTRUE) {
+        return listener;
+    }
+
+    if (event.kind == EspNowTunnel) {
+        send_tunnel_event(glb, data, &event.tunnel);
         return listener;
     }
 
@@ -233,6 +310,7 @@ static int get_channel(term t)
 
 static void teardown(struct EspNowData *data)
 {
+    espnow_tunnel_stop();
     esp_now_unregister_recv_cb();
     esp_now_unregister_send_cb();
     esp_now_deinit();
@@ -264,8 +342,12 @@ static Context *espnow_create_port(GlobalContext *global, term opts)
     term receiver = interop_kv_get_value_default(opts, ATOM_STR("\x8", "receiver"), term_invalid_term(), global);
     term channel_term = interop_kv_get_value_default(opts, ATOM_STR("\x7", "channel"), term_from_int(0), global);
     term pmk = interop_kv_get_value_default(opts, ATOM_STR("\x3", "pmk"), term_invalid_term(), global);
+    term tunnel_term = interop_kv_get_value_default(opts, ATOM_STR("\x6", "tunnel"), term_invalid_term(), global);
     int channel = get_channel(channel_term);
+    term node_atom = globalcontext_make_atom(global, ATOM_STR("\x4", "node"));
+    term gateway_atom = globalcontext_make_atom(global, ATOM_STR("\x7", "gateway"));
     if (!term_is_local_pid(receiver) || channel < 0
+        || (!term_is_invalid_term(tunnel_term) && tunnel_term != node_atom && tunnel_term != gateway_atom)
         || (!term_is_invalid_term(pmk) && (!term_is_binary(pmk) || term_binary_size(pmk) != ESP_NOW_KEY_LEN))) {
         ESP_LOGE(TAG, "Invalid options");
         return NULL;
@@ -316,7 +398,9 @@ static Context *espnow_create_port(GlobalContext *global, term opts)
         || (!term_is_invalid_term(pmk) && (err = esp_now_set_pmk((const uint8_t *) term_binary_data(pmk))) != ESP_OK)
         || (err = esp_now_register_recv_cb(espnow_recv_cb)) != ESP_OK
         || (err = esp_now_register_send_cb(espnow_send_cb)) != ESP_OK
-        || (err = add_peer(broadcast_mac, 0, NULL)) != ESP_OK) {
+        || (err = add_peer(broadcast_mac, 0, NULL)) != ESP_OK
+        || (!term_is_invalid_term(tunnel_term)
+            && (err = espnow_tunnel_start(tunnel_term == gateway_atom ? EspNowTunnelGateway : EspNowTunnelNode, espnow_tunnel_event)) != ESP_OK)) {
         ESP_LOGE(TAG, "Failed to start ESP-NOW: %s", esp_err_to_name(err));
         teardown(data);
         return NULL;
@@ -406,11 +490,23 @@ static term do_get_channel(Context *ctx)
     return ok;
 }
 
-// {ok, #{dropped => N}}: events lost because the queue was full.
+// {ok, #{dropped => N}}: events lost because the queue was full. With a
+// tunnel, also its frames: tunnel_tx, tunnel_tx_fail, tunnel_rx, tunnel_rx_drop.
 static term do_stats(Context *ctx, struct EspNowData *data)
 {
-    term map = term_alloc_map(1, &ctx->heap);
-    term_set_map_assoc(map, 0, globalcontext_make_atom(ctx->global, ATOM_STR("\x7", "dropped")), term_from_int(data->dropped));
+    GlobalContext *glb = ctx->global;
+    struct EspNowTunnelStats tunnel;
+    bool with_tunnel = espnow_tunnel_stats(&tunnel);
+    term map = term_alloc_map(with_tunnel ? 7 : 1, &ctx->heap);
+    term_set_map_assoc(map, 0, globalcontext_make_atom(glb, ATOM_STR("\x7", "dropped")), term_from_int(data->dropped));
+    if (with_tunnel) {
+        term_set_map_assoc(map, 1, globalcontext_make_atom(glb, ATOM_STR("\x9", "tunnel_rx")), term_from_int(tunnel.rx));
+        term_set_map_assoc(map, 2, globalcontext_make_atom(glb, ATOM_STR("\x9", "tunnel_tx")), term_from_int(tunnel.tx));
+        term_set_map_assoc(map, 3, globalcontext_make_atom(glb, ATOM_STR("\xE", "tunnel_rx_drop")), term_from_int(tunnel.rx_drop));
+        term_set_map_assoc(map, 4, globalcontext_make_atom(glb, ATOM_STR("\xE", "tunnel_tx_fail")), term_from_int(tunnel.tx_fail));
+        term_set_map_assoc(map, 5, globalcontext_make_atom(glb, ATOM_STR("\xB", "tunnel_nack")), term_from_int(tunnel.nack));
+        term_set_map_assoc(map, 6, globalcontext_make_atom(glb, ATOM_STR("\xC", "tunnel_heard")), term_from_int(tunnel.heard));
+    }
     term ok = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(ok, 0, OK_ATOM);
     term_put_tuple_element(ok, 1, map);
@@ -434,7 +530,7 @@ static NativeHandlerResult espnow_consume_mailbox(Context *ctx)
         enum espnow_cmd cmd = term_is_atom(cmd_term) ? interop_atom_term_select_int(cmd_table, cmd_term, ctx->global) : EspNowInvalidCmd;
 
         // The largest reply: {Ref, {ok, #{dropped => N}}}, or an error tuple.
-        if (UNLIKELY(memory_ensure_free(ctx, PORT_REPLY_SIZE + TUPLE_SIZE(2) + term_map_size_in_terms(1)) != MEMORY_GC_OK)) {
+        if (UNLIKELY(memory_ensure_free(ctx, PORT_REPLY_SIZE + TUPLE_SIZE(2) + term_map_size_in_terms(7)) != MEMORY_GC_OK)) {
             ESP_LOGE(TAG, "No memory for a reply");
             mailbox_remove_message(&ctx->mailbox, &ctx->heap);
             continue;

@@ -21,6 +21,11 @@
 cmake_minimum_required (VERSION 3.13)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
+# lwIP's NAT (CONFIG_LWIP_IPV4_NAPT, an ESP-NOW tunnel gateway) allocates
+# its whole table at once: 512 entries of 40 bytes by default, 20 KB that a
+# board without PSRAM does not have. One entry per connection of a node.
+idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_MAX=32" APPEND)
+
 # Don't try to link when testing availability of functions
 set(CMAKE_TRY_COMPILE_TARGET_TYPE "STATIC_LIBRARY")
 

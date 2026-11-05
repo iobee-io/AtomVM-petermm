@@ -19,6 +19,8 @@
  */
 
 #include <sdkconfig.h>
+
+#include <stdatomic.h>
 #ifdef CONFIG_AVM_ENABLE_ESPNOW
 
 #include <stdlib.h>
@@ -61,6 +63,13 @@
 #define HOP_TICKS 2
 #define MAX_CHANNEL 13
 #define LOST_US (5 * 1000 * 1000)
+// Received frames are copies until lwIP frees them: in the TCP/IP mailbox,
+// on a socket waiting for its reader. Over the Wi-Fi driver its RX buffers
+// bound how many (2 static and 8 dynamic in our builds); a copy frees the
+// Wi-Fi buffer at once, so a burst (TLS handshakes, a download) could hold
+// tens of KB of the heap. Past this many a frame is dropped, as on a full
+// Wi-Fi RX, and TCP sends it again.
+#define RX_HELD_MAX 10
 #define ROUTE_PRIO 5
 
 struct Tunnel;
@@ -100,6 +109,22 @@ struct Tunnel
 };
 
 static struct Tunnel *tunnel;
+
+// A copy for lwIP: the pbuf, then the frame. Freed by lwIP, maybe after the
+// tunnel is gone, so the count is not the tunnel's.
+struct RxCopy
+{
+    struct pbuf_custom pbuf;
+    uint8_t data[];
+};
+
+static atomic_int rx_held;
+
+static void rx_copy_free(struct pbuf *p)
+{
+    atomic_fetch_sub(&rx_held, 1);
+    free(p);
+}
 
 static const uint8_t broadcast_mac[MAC_LEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -181,14 +206,27 @@ bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data,
         t->stats.rx_drop++;
         return true;
     }
-    // Copied, not handed as a custom pbuf that points at the netif: a socket
-    // can hold a received pbuf after the tunnel is gone.
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, len - 1, PBUF_RAM);
-    if (UNLIKELY(p == NULL)) {
+    // Copied, not handed as a pbuf that points at the Wi-Fi buffer or the
+    // netif: a socket can hold a received pbuf after the tunnel is gone.
+    int held = atomic_fetch_add(&rx_held, 1) + 1;
+    if (held > RX_HELD_MAX) {
+        atomic_fetch_sub(&rx_held, 1);
+        t->stats.rx_full++;
+        return true;
+    }
+    if ((uint32_t) held > t->stats.rx_held_max) {
+        t->stats.rx_held_max = held;
+    }
+    uint16_t size = len - 1;
+    struct RxCopy *copy = malloc(sizeof(struct RxCopy) + size);
+    if (UNLIKELY(copy == NULL)) {
+        atomic_fetch_sub(&rx_held, 1);
         t->stats.rx_drop++;
         return true;
     }
-    memcpy(p->payload, data + 1, len - 1);
+    copy->pbuf.custom_free_function = rx_copy_free;
+    memcpy(copy->data, data + 1, size);
+    struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, size, PBUF_REF, &copy->pbuf, copy->data, size);
     if (lwip->input(p, lwip) != ERR_OK) {
         pbuf_free(p);
         t->stats.rx_drop++;

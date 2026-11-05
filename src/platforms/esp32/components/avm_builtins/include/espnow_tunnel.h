@@ -72,6 +72,10 @@ struct EspNowTunnelStats
     uint32_t rx_drop;
     uint32_t nack;
     uint32_t heard;
+    // Frames dropped because RX_HELD_MAX copies were already in lwIP, and
+    // the most copies held at once.
+    uint32_t rx_full;
+    uint32_t rx_held_max;
 };
 
 // Delivered from the tunnel's timer task; the callee queues it.

@@ -491,13 +491,14 @@ static term do_get_channel(Context *ctx)
 }
 
 // {ok, #{dropped => N}}: events lost because the queue was full. With a
-// tunnel, also its frames: tunnel_tx, tunnel_tx_fail, tunnel_rx, tunnel_rx_drop.
+// tunnel, also its frames: tunnel_tx, tunnel_tx_fail, tunnel_rx, tunnel_rx_drop,
+// tunnel_rx_full (dropped with lwIP holding enough), tunnel_rx_held_max.
 static term do_stats(Context *ctx, struct EspNowData *data)
 {
     GlobalContext *glb = ctx->global;
     struct EspNowTunnelStats tunnel;
     bool with_tunnel = espnow_tunnel_stats(&tunnel);
-    term map = term_alloc_map(with_tunnel ? 7 : 1, &ctx->heap);
+    term map = term_alloc_map(with_tunnel ? 9 : 1, &ctx->heap);
     term_set_map_assoc(map, 0, globalcontext_make_atom(glb, ATOM_STR("\x7", "dropped")), term_from_int(data->dropped));
     if (with_tunnel) {
         term_set_map_assoc(map, 1, globalcontext_make_atom(glb, ATOM_STR("\x9", "tunnel_rx")), term_from_int(tunnel.rx));
@@ -506,6 +507,8 @@ static term do_stats(Context *ctx, struct EspNowData *data)
         term_set_map_assoc(map, 4, globalcontext_make_atom(glb, ATOM_STR("\xE", "tunnel_tx_fail")), term_from_int(tunnel.tx_fail));
         term_set_map_assoc(map, 5, globalcontext_make_atom(glb, ATOM_STR("\xB", "tunnel_nack")), term_from_int(tunnel.nack));
         term_set_map_assoc(map, 6, globalcontext_make_atom(glb, ATOM_STR("\xC", "tunnel_heard")), term_from_int(tunnel.heard));
+        term_set_map_assoc(map, 7, globalcontext_make_atom(glb, ATOM_STR("\xE", "tunnel_rx_full")), term_from_int(tunnel.rx_full));
+        term_set_map_assoc(map, 8, globalcontext_make_atom(glb, ATOM_STR("\x12", "tunnel_rx_held_max")), term_from_int(tunnel.rx_held_max));
     }
     term ok = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(ok, 0, OK_ATOM);
@@ -530,7 +533,7 @@ static NativeHandlerResult espnow_consume_mailbox(Context *ctx)
         enum espnow_cmd cmd = term_is_atom(cmd_term) ? interop_atom_term_select_int(cmd_table, cmd_term, ctx->global) : EspNowInvalidCmd;
 
         // The largest reply: {Ref, {ok, #{dropped => N}}}, or an error tuple.
-        if (UNLIKELY(memory_ensure_free(ctx, PORT_REPLY_SIZE + TUPLE_SIZE(2) + term_map_size_in_terms(7)) != MEMORY_GC_OK)) {
+        if (UNLIKELY(memory_ensure_free(ctx, PORT_REPLY_SIZE + TUPLE_SIZE(2) + term_map_size_in_terms(9)) != MEMORY_GC_OK)) {
             ESP_LOGE(TAG, "No memory for a reply");
             mailbox_remove_message(&ctx->mailbox, &ctx->heap);
             continue;

@@ -87,6 +87,7 @@ struct Tunnel
     // (Wi-Fi task), the rest is the timer's.
     volatile bool heard;
     uint8_t heard_mac[MAC_LEN];
+    uint8_t heard_channel;
     volatile int64_t last_heard;
     volatile bool locked;
     bool has_ip;
@@ -168,6 +169,7 @@ bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data,
     if (data[0] == TUNNEL_BEACON) {
         if (node && !t->locked && !t->heard && len == BEACON_LEN && memcmp(data + 1, "ib\x01", 3) == 0) {
             memcpy(t->heard_mac, info->src_addr, MAC_LEN);
+            t->heard_channel = data[4];
             t->heard = true;
         }
         return true;
@@ -222,7 +224,14 @@ static void node_tick(struct Tunnel *t)
     int64_t now = esp_timer_get_time();
     if (!t->locked) {
         if (t->heard) {
-            // Heard on the current channel: stay on it.
+            // The beacon carries the gateway's channel. Near the gateway a node
+            // hears it on a neighbouring channel too, where farther away the
+            // two would hardly hear each other: move to the gateway's.
+            uint8_t channel = t->heard_channel;
+            if (channel >= 1 && channel <= MAX_CHANNEL && channel != t->channel) {
+                t->channel = channel;
+                esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+            }
             memcpy(t->gateway, t->heard_mac, MAC_LEN);
             t->heard = false;
             t->has_ip = false;

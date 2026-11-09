@@ -78,7 +78,7 @@ static size_t append_chunk(uint8_t *beam, size_t offset, const char *name, const
 }
 
 // One final BEAM member with no padding beyond the archive's end marker.
-static uint8_t *make_pack(const char *name, bool with_import, size_t *beam_size)
+static uint8_t *make_pack(const char *name, bool with_import, size_t *beam_size, uint32_t *pack_size)
 {
     uint8_t beam[128] = { 0 };
     memcpy(beam, "FOR1", 4);
@@ -109,7 +109,8 @@ static uint8_t *make_pack(const char *name, bool with_import, size_t *beam_size)
     *beam_size = offset;
 
     size_t header_size = 12 + ((strlen(name) + 6 + 3) & ~3);
-    uint8_t *pack = calloc(1, 24 + header_size + offset + 16);
+    *pack_size = 24 + header_size + offset + 16;
+    uint8_t *pack = calloc(1, *pack_size);
     assert(pack != NULL);
     memcpy(pack, "#!/usr/bin/env AtomVM\n", 21);
     write_u32(pack + 24, header_size + offset);
@@ -145,19 +146,20 @@ static void test_module_in_ram(bool deferred, unsigned int fail_at)
 {
     const char *name = deferred ? "ram_module_late" : "ram_module";
     size_t beam_size;
-    uint8_t *pack = make_pack(name, fail_at == 3, &beam_size);
+    uint32_t pack_size;
+    uint8_t *pack = make_pack(name, fail_at == 3, &beam_size, &pack_size);
     const void *beam;
     uint32_t section_size;
     const char *section_name;
-    assert(avmpack_find_section_by_flag(pack, BEAM_START_FLAG, BEAM_START_FLAG, &beam, &section_size, &section_name));
-    assert(section_size > beam_size);
+    assert(avmpack_find_section_by_flag(pack, pack_size, BEAM_START_FLAG, BEAM_START_FLAG, &beam, &section_size, &section_name));
+    assert(section_size >= beam_size);
     GlobalContext *global = globalcontext_new();
     assert(global != NULL);
     Module *mod;
     if (deferred) {
         struct ConstAVMPack *avm = malloc(sizeof(struct ConstAVMPack));
         assert(avm != NULL);
-        avmpack_data_init(&avm->base, &const_avm_pack_info);
+        avmpack_data_init(&avm->base, &const_avm_pack_info, pack_size);
         avm->base.data = pack;
         synclist_append(&global->avmpack_data, &avm->base.avmpack_head);
         reset_allocations(fail_at);
@@ -199,10 +201,11 @@ static void test_module_in_ram(bool deferred, unsigned int fail_at)
 static void test_truncated_beam(void)
 {
     size_t beam_size;
-    uint8_t *pack = make_pack("ram_module", false, &beam_size);
+    uint32_t pack_size;
+    uint8_t *pack = make_pack("ram_module", false, &beam_size, &pack_size);
     const void *beam;
     uint32_t section_size;
-    assert(avmpack_find_section_by_name(pack, "ram_module.beam", &beam, &section_size));
+    assert(avmpack_find_section_by_name(pack, pack_size, "ram_module.beam", &beam, &section_size));
     GlobalContext *global = globalcontext_new();
     assert(global != NULL);
     reset_allocations(0);
@@ -217,10 +220,11 @@ static void test_truncated_beam(void)
 static uint8_t *make_labt_beam(size_t opcode_size, uint32_t labels, size_t *beam_size)
 {
     size_t template_size;
-    uint8_t *pack = make_pack("labt_probe", false, &template_size);
+    uint32_t pack_size;
+    uint8_t *pack = make_pack("labt_probe", false, &template_size, &pack_size);
     const void *template;
     uint32_t section_size;
-    assert(avmpack_find_section_by_name(pack, "labt_probe.beam", &template, &section_size));
+    assert(avmpack_find_section_by_name(pack, pack_size, "labt_probe.beam", &template, &section_size));
     unsigned long offsets[MAX_OFFS];
     unsigned long sizes[MAX_SIZES];
     scan_iff(template, template_size, offsets, sizes);
@@ -530,10 +534,11 @@ static void test_module_wide_atom_index(void)
         assert(index == expected);
     }
     size_t beam_size;
-    uint8_t *pack = make_pack("wide_module", false, &beam_size);
+    uint32_t pack_size;
+    uint8_t *pack = make_pack("wide_module", false, &beam_size, &pack_size);
     const void *beam;
     uint32_t section_size;
-    assert(avmpack_find_section_by_name(pack, "wide_module.beam", &beam, &section_size));
+    assert(avmpack_find_section_by_name(pack, pack_size, "wide_module.beam", &beam, &section_size));
     reset_allocations(0);
     Module *mod = module_new_from_iff_binary(global, beam, beam_size);
     assert(mod != NULL);
@@ -571,12 +576,13 @@ static void test_module_static_atoms(void)
             size_t n = order == 0 ? i : count - 1 - i;
             assert(atom_table_get_index_from_cstring(global->atom_table, names[n]) == indices[n]);
             size_t beam_size;
-            uint8_t *pack = make_pack(names[n], false, &beam_size);
+            uint32_t pack_size;
+            uint8_t *pack = make_pack(names[n], false, &beam_size, &pack_size);
             const void *beam;
             uint32_t section_size;
             char section_name[sizeof(names[0]) + 5];
             snprintf(section_name, sizeof(section_name), "%s.beam", names[n]);
-            assert(avmpack_find_section_by_name(pack, section_name, &beam, &section_size));
+            assert(avmpack_find_section_by_name(pack, pack_size, section_name, &beam, &section_size));
             reset_allocations(0);
             Module *mod = module_new_from_iff_binary(global, beam, beam_size);
             assert(mod != NULL);

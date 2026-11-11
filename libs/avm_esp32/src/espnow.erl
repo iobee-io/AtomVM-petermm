@@ -46,8 +46,9 @@
 %% node then hops again). A `relay' goes out like a node and, with an
 %% address, is a gateway to nodes farther away: 10.42.N.0/24 of its own (N
 %% from its MAC), NATed out through its gateway, announced one hop deeper. A
-%% node or relay follows the first gateway or relay it hears, but never a
-%% relay that goes out by itself, nor one 4 hops deep; its receiver gets the
+%% node or relay follows the one closest to the gateway it hears (fewer hops,
+%% then the stronger signal), but never a relay that goes out by itself, nor
+%% one 4 hops deep; its receiver gets the
 %% node's messages. A node whose gateway or relay restarted (its beacon
 %% carries a number drawn at each start) gets `down' at once, even when the
 %% restart took less than 5 s. Frames whose first byte is 16#A5 or 16#A6 are the

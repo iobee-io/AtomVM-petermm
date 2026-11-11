@@ -41,8 +41,11 @@
  *   - a relay goes out like a node and, once it has an address, is a
  *     gateway to nodes farther away: a netif of its own on 10.42.N.0/24, N
  *     from its MAC, NATed out through its way out, and a beacon one hop
- *     deeper. A node or relay follows the first gateway or relay it hears,
- *     never a relay that goes out by itself, nor one 4 hops deep.
+ *     deeper. A node or relay follows a gateway it hears well at once; a
+ *     relay, after listening 0.6 s on its channel for one closer to the
+ *     gateway (fewer hops, then the stronger signal, a weak one only when
+ *     there is no other); never a relay that goes out by itself, nor one 4
+ *     hops deep.
  *
  * The gateway's and a relay's beacons carry a number drawn each time they
  * open: a node that hears its own with another number goes down at once, as

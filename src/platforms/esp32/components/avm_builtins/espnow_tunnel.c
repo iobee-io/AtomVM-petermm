@@ -72,6 +72,12 @@
 // The gateway announces itself each tick, a node listens two ticks per channel:
 // a pass over the 13 channels takes 5.2 s.
 #define HOP_TICKS 2
+// Having heard a relay, a node stays on its channel this long, hearing each
+// beacon there about three times, to follow the one closest to the gateway.
+// A gateway's is followed at once.
+#define LISTEN_TICKS 3
+// A beacon weaker than this is followed only when there is no other.
+#define WEAK_RSSI (-85)
 #define MAX_CHANNEL 13
 #define LOST_US (5 * 1000 * 1000)
 #define ROUTE_PRIO 5
@@ -101,12 +107,17 @@ struct Tunnel
     volatile bool running;
     // A node's state. `heard' and `last_heard' come from the receive callback
     // (Wi-Fi task), the rest is the timer's.
+    // The best beacon heard since the node started listening (`heard'), under
+    // `heard_lock': the receive callback writes it, the timer reads it.
+    portMUX_TYPE heard_lock;
     volatile bool heard;
     uint8_t heard_mac[MAC_LEN];
     uint8_t heard_channel;
-    volatile int64_t last_heard;
     uint8_t heard_depth;
     uint8_t heard_session;
+    int8_t heard_rssi;
+    unsigned heard_tick;
+    volatile int64_t last_heard;
     volatile bool locked;
     // The locked gateway's session (0 until heard), and its change, seen by
     // the receive callback.
@@ -188,7 +199,20 @@ static esp_err_t tunnel_post_attach(esp_netif_t *netif, void *args)
 // A gateway's beacon is depth 0. A relay's is followed unless it goes out by
 // this board (one of its own nodes, which still beacons for a while after
 // this board lost its way out) or it is too deep.
-static void hear_beacon(struct Tunnel *t, const uint8_t *from, const uint8_t *data, int len)
+// Better: a usable signal over a weak one, then fewer hops, then the stronger.
+static bool better_beacon(int8_t rssi, uint8_t depth, int8_t than_rssi, uint8_t than_depth)
+{
+    bool usable = rssi >= WEAK_RSSI;
+    if (usable != (than_rssi >= WEAK_RSSI)) {
+        return usable;
+    }
+    if (depth != than_depth) {
+        return depth < than_depth;
+    }
+    return rssi > than_rssi;
+}
+
+static void hear_beacon(struct Tunnel *t, const uint8_t *from, int8_t rssi, const uint8_t *data, int len)
 {
     uint8_t depth;
     uint8_t session = 0;
@@ -201,11 +225,22 @@ static void hear_beacon(struct Tunnel *t, const uint8_t *from, const uint8_t *da
     } else {
         return;
     }
-    memcpy(t->heard_mac, from, MAC_LEN);
-    t->heard_channel = data[4];
-    t->heard_depth = depth;
-    t->heard_session = session;
-    t->heard = true;
+    taskENTER_CRITICAL(&t->heard_lock);
+    // The gateway's version 1 and 2 beacons come one after the other: the
+    // second adds the session to the first.
+    bool same = t->heard && memcmp(t->heard_mac, from, MAC_LEN) == 0;
+    if (!t->heard || (same && session != 0) || (!same && better_beacon(rssi, depth, t->heard_rssi, t->heard_depth))) {
+        if (!t->heard) {
+            t->heard_tick = t->ticks;
+        }
+        memcpy(t->heard_mac, from, MAC_LEN);
+        t->heard_channel = data[4];
+        t->heard_depth = depth;
+        t->heard_session = session;
+        t->heard_rssi = rssi;
+        t->heard = true;
+    }
+    taskEXIT_CRITICAL(&t->heard_lock);
 }
 
 // The locked gateway's version 2 beacon: its session, learnt from the first
@@ -238,8 +273,8 @@ bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data,
     }
 
     if (data[0] == TUNNEL_BEACON) {
-        if (node && !t->locked && !t->heard) {
-            hear_beacon(t, info->src_addr, data, len);
+        if (node && !t->locked) {
+            hear_beacon(t, info->src_addr, info->rx_ctrl->rssi, data, len);
         } else if (from_gateway) {
             check_session(t, data, len);
         }
@@ -462,26 +497,40 @@ static void node_tick(struct Tunnel *t)
 {
     int64_t now = esp_timer_get_time();
     if (!t->locked) {
-        if (t->heard) {
+        t->ticks++;
+        taskENTER_CRITICAL(&t->heard_lock);
+        // A gateway heard well is followed at once; anything else after
+        // LISTEN_TICKS on its channel, the best heard by then.
+        bool chosen = t->heard
+            && ((t->heard_depth == 0 && t->heard_rssi >= WEAK_RSSI) || t->ticks - t->heard_tick >= LISTEN_TICKS);
+        uint8_t mac[MAC_LEN];
+        uint8_t channel = t->heard_channel;
+        uint8_t depth = t->heard_depth;
+        uint8_t session = t->heard_session;
+        bool heard = t->heard;
+        memcpy(mac, t->heard_mac, MAC_LEN);
+        if (chosen) {
+            t->heard = false;
+        }
+        taskEXIT_CRITICAL(&t->heard_lock);
+        if (chosen) {
             // The beacon carries the gateway's channel. Near the gateway a node
             // hears it on a neighbouring channel too, where farther away the
             // two would hardly hear each other: move to the gateway's.
-            uint8_t channel = t->heard_channel;
             if (channel >= 1 && channel <= MAX_CHANNEL && channel != t->channel) {
                 t->channel = channel;
                 esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
             }
-            memcpy(t->gateway, t->heard_mac, MAC_LEN);
-            t->depth = t->heard_depth + 1;
-            t->session = t->heard_session;
+            memcpy(t->gateway, mac, MAC_LEN);
+            t->depth = depth + 1;
+            t->session = session;
             t->restarted = false;
-            t->heard = false;
             t->has_ip = false;
             t->last_heard = now;
             t->locked = true;
             esp_netif_action_connected(t->netif, NULL, 0, NULL);
             node_notify(t, EspNowTunnelUp, NULL);
-        } else if (++t->ticks % HOP_TICKS == 0) {
+        } else if (!heard && t->ticks % HOP_TICKS == 0) {
             t->channel = t->channel % MAX_CHANNEL + 1;
             esp_wifi_set_channel(t->channel, WIFI_SECOND_CHAN_NONE);
         }
@@ -560,6 +609,7 @@ esp_err_t espnow_tunnel_start(enum EspNowTunnelRole role, espnow_tunnel_notify n
     }
     t->role = role;
     t->notify = notify;
+    portMUX_INITIALIZE(&t->heard_lock);
     t->tick_lock = xSemaphoreCreateMutex();
     t->drained = xSemaphoreCreateBinary();
     if (t->tick_lock == NULL || t->drained == NULL) {

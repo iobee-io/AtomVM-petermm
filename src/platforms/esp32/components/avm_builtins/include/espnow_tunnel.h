@@ -44,6 +44,11 @@
  *     deeper. A node or relay follows the first gateway or relay it hears,
  *     never a relay that goes out by itself, nor one 4 hops deep.
  *
+ * The gateway's and a relay's beacons carry a number drawn each time they
+ * open: a node that hears its own with another number goes down at once, as
+ * the NAT its sessions went through is gone, even when the restart took less
+ * than the 5 s that make a gateway lost.
+ *
  * Needs ESP-NOW v2 (ESP-IDF 5.4 or newer), whose 1470-byte frames fit an
  * Ethernet frame; the gateway and a relay also need CONFIG_LWIP_IPV4_NAPT.
  */

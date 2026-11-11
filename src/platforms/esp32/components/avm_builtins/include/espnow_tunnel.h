@@ -37,16 +37,22 @@
  *     announces itself in broadcast on its channel;
  *   - a node, with no network, hops the channels until it hears a gateway,
  *     stays on its channel and gets an address from it. When the gateway is
- *     not heard for a while it goes down and hops again.
+ *     not heard for a while it goes down and hops again;
+ *   - a relay goes out like a node and, once it has an address, is a
+ *     gateway to nodes farther away: a netif of its own on 10.42.N.0/24, N
+ *     from its MAC, NATed out through its way out, and a beacon one hop
+ *     deeper. A node or relay follows the first gateway or relay it hears,
+ *     never a relay that goes out by itself, nor one 4 hops deep.
  *
  * Needs ESP-NOW v2 (ESP-IDF 5.4 or newer), whose 1470-byte frames fit an
- * Ethernet frame; the gateway also needs CONFIG_LWIP_IPV4_NAPT.
+ * Ethernet frame; the gateway and a relay also need CONFIG_LWIP_IPV4_NAPT.
  */
 
 enum EspNowTunnelRole
 {
     EspNowTunnelNode,
-    EspNowTunnelGateway
+    EspNowTunnelGateway,
+    EspNowTunnelRelay
 };
 
 enum EspNowTunnelEventKind

@@ -43,7 +43,12 @@
 %% an address. The receiver gets `{espnow, tunnel, {up, GatewayMac, Channel}}',
 %% `{espnow, tunnel, {got_ip, {Address, Netmask, Gateway}}}', and
 %% `{espnow, tunnel, down}' when the gateway has not been heard for 5 s (the
-%% node then hops again). Frames whose first byte is 16#A5 or 16#A6 are the
+%% node then hops again). A `relay' goes out like a node and, with an
+%% address, is a gateway to nodes farther away: 10.42.N.0/24 of its own (N
+%% from its MAC), NATed out through its gateway, announced one hop deeper. A
+%% node or relay follows the first gateway or relay it hears, but never a
+%% relay that goes out by itself, nor one 4 hops deep; its receiver gets the
+%% node's messages. Frames whose first byte is 16#A5 or 16#A6 are the
 %% tunnel's, and with a tunnel no `sent' result is reported.
 %% @end
 %%-----------------------------------------------------------------------------
@@ -70,7 +75,7 @@
     {receiver, pid()}
     | {channel, channel()}
     | {pmk, key()}
-    | {tunnel, node | gateway}.
+    | {tunnel, node | gateway | relay}.
 %% `pmk' is the primary key that encrypts the peers' `lmk' keys.
 
 -type peer_option() :: {channel, channel()} | {lmk, key()}.

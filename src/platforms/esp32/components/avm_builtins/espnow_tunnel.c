@@ -30,6 +30,7 @@
 #include <esp_netif_defaults.h>
 #include <esp_netif_net_stack.h>
 #include <esp_now.h>
+#include <esp_random.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -51,12 +52,17 @@
 #define TUNNEL_BEACON 0xA5
 #define TUNNEL_FRAME 0xA6
 #define MAC_LEN 6
-// A gateway's: {TUNNEL_BEACON, 'i', 'b', 1, Channel}.
+// Version 1, a gateway's, for the nodes of a VM without relays:
+// {TUNNEL_BEACON, 'i', 'b', 1, Channel}.
 #define BEACON_LEN 5
-// A relay's: {TUNNEL_BEACON, 'i', 'b', 2, Channel, Depth, ParentMac:6}, Depth
-// the hops to the gateway (1 for a relay on a gateway) and ParentMac the
-// gateway or relay it goes out by.
-#define RELAY_BEACON_LEN (BEACON_LEN + 1 + MAC_LEN)
+// Version 2, a gateway's and a relay's:
+// {TUNNEL_BEACON, 'i', 'b', 2, Channel, Depth, ParentMac:6, Session}. Depth
+// is the hops to the gateway (0 for the gateway, 1 for a relay on it),
+// ParentMac the gateway or relay it goes out by (zero on the gateway), and
+// Session a number drawn each time it opens: a node that hears its gateway
+// with another one knows it restarted, and with it the NAT its sessions
+// went through, even when that took less than LOST_US.
+#define BEACON_V2_LEN (BEACON_LEN + 1 + MAC_LEN + 1)
 // A beacon this deep is not followed: a loop of relays that lost their way
 // out counts up to it and breaks.
 #define MAX_DEPTH 4
@@ -100,7 +106,12 @@ struct Tunnel
     uint8_t heard_channel;
     volatile int64_t last_heard;
     uint8_t heard_depth;
+    uint8_t heard_session;
     volatile bool locked;
+    // The locked gateway's session (0 until heard), and its change, seen by
+    // the receive callback.
+    volatile uint8_t session;
+    volatile bool restarted;
     bool has_ip;
     uint8_t gateway[MAC_LEN];
     uint8_t depth;
@@ -113,6 +124,8 @@ struct Tunnel
     esp_netif_t *down_netif;
     struct netif *volatile down_lwip;
     volatile bool down_up;
+    // A gateway's session, or a relay's for its own nodes.
+    uint8_t own_session;
     struct EspNowTunnelStats stats;
     // Only lwIP's output uses it, one frame at a time.
     uint8_t tx[ESP_NOW_MAX_DATA_LEN_V2];
@@ -178,18 +191,36 @@ static esp_err_t tunnel_post_attach(esp_netif_t *netif, void *args)
 static void hear_beacon(struct Tunnel *t, const uint8_t *from, const uint8_t *data, int len)
 {
     uint8_t depth;
+    uint8_t session = 0;
     if (len == BEACON_LEN && memcmp(data + 1, "ib\x01", 3) == 0) {
         depth = 0;
-    } else if (len == RELAY_BEACON_LEN && memcmp(data + 1, "ib\x02", 3) == 0
+    } else if (len == BEACON_V2_LEN && memcmp(data + 1, "ib\x02", 3) == 0
         && data[5] < MAX_DEPTH && memcmp(data + 6, t->mac, MAC_LEN) != 0) {
         depth = data[5];
+        session = data[BEACON_V2_LEN - 1];
     } else {
         return;
     }
     memcpy(t->heard_mac, from, MAC_LEN);
     t->heard_channel = data[4];
     t->heard_depth = depth;
+    t->heard_session = session;
     t->heard = true;
+}
+
+// The locked gateway's version 2 beacon: its session, learnt from the first
+// one (a gateway heard by its version 1 beacon has none yet), or changed.
+static void check_session(struct Tunnel *t, const uint8_t *data, int len)
+{
+    if (len != BEACON_V2_LEN || memcmp(data + 1, "ib\x02", 3) != 0) {
+        return;
+    }
+    uint8_t session = data[BEACON_V2_LEN - 1];
+    if (t->session == 0) {
+        t->session = session;
+    } else if (session != t->session) {
+        t->restarted = true;
+    }
 }
 
 bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
@@ -209,6 +240,8 @@ bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data,
     if (data[0] == TUNNEL_BEACON) {
         if (node && !t->locked && !t->heard) {
             hear_beacon(t, info->src_addr, data, len);
+        } else if (from_gateway) {
+            check_session(t, data, len);
         }
         return true;
     }
@@ -243,15 +276,32 @@ bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data,
     return true;
 }
 
+static void send_beacon_v2(uint8_t channel, uint8_t depth, const uint8_t *parent, uint8_t session)
+{
+    uint8_t beacon[BEACON_V2_LEN] = { TUNNEL_BEACON, 'i', 'b', 2, channel, depth };
+    if (parent != NULL) {
+        memcpy(beacon + BEACON_LEN + 1, parent, MAC_LEN);
+    }
+    beacon[BEACON_V2_LEN - 1] = session;
+    esp_now_send(broadcast_mac, beacon, BEACON_V2_LEN);
+}
+
+// Both versions: a node of an older VM knows only the first.
 static void gateway_tick(struct Tunnel *t)
 {
-    (void) t;
     uint8_t primary;
     wifi_second_chan_t second;
     if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
         const uint8_t beacon[BEACON_LEN] = { TUNNEL_BEACON, 'i', 'b', 1, primary };
         esp_now_send(broadcast_mac, beacon, BEACON_LEN);
+        send_beacon_v2(primary, 0, NULL, t->own_session);
     }
+}
+
+// 1 to 255: 0 is a session not heard yet.
+static uint8_t new_session(void)
+{
+    return 1 + esp_random() % 255;
 }
 
 static void tunnel_drained(void *arg)
@@ -373,6 +423,7 @@ static void relay_open(struct Tunnel *t, const esp_netif_ip_info_t *ip)
         return;
     }
     t->down_lwip = esp_netif_get_netif_impl(t->down_netif);
+    t->own_session = new_session();
     t->down_up = true;
     ESP_LOGI(TAG, "Relay open on 10.42.%u.1, %u hop(s) from the gateway", n, t->depth);
 }
@@ -394,9 +445,7 @@ static void relay_close(struct Tunnel *t)
 
 static void relay_beacon(struct Tunnel *t)
 {
-    uint8_t beacon[RELAY_BEACON_LEN] = { TUNNEL_BEACON, 'i', 'b', 2, t->channel, t->depth };
-    memcpy(beacon + BEACON_LEN + 1, t->gateway, MAC_LEN);
-    esp_now_send(broadcast_mac, beacon, RELAY_BEACON_LEN);
+    send_beacon_v2(t->channel, t->depth, t->gateway, t->own_session);
 }
 
 static void node_notify(struct Tunnel *t, enum EspNowTunnelEventKind kind, const esp_netif_ip_info_t *ip)
@@ -424,6 +473,8 @@ static void node_tick(struct Tunnel *t)
             }
             memcpy(t->gateway, t->heard_mac, MAC_LEN);
             t->depth = t->heard_depth + 1;
+            t->session = t->heard_session;
+            t->restarted = false;
             t->heard = false;
             t->has_ip = false;
             t->last_heard = now;
@@ -436,7 +487,11 @@ static void node_tick(struct Tunnel *t)
         }
         return;
     }
-    if (now - t->last_heard > LOST_US) {
+    bool restarted = t->restarted;
+    if (restarted || now - t->last_heard > LOST_US) {
+        if (restarted) {
+            ESP_LOGI(TAG, "The gateway restarted: going down");
+        }
         t->locked = false;
         relay_close(t);
         esp_netif_action_disconnected(t->netif, NULL, 0, NULL);
@@ -536,6 +591,7 @@ esp_err_t espnow_tunnel_start(enum EspNowTunnelRole role, espnow_tunnel_notify n
     uint8_t primary;
     wifi_second_chan_t second;
     t->channel = esp_wifi_get_channel(&primary, &second) == ESP_OK ? primary : 1;
+    t->own_session = new_session();
     t->running = true;
     tunnel = t;
     esp_timer_start_periodic(t->timer, TICK_US);

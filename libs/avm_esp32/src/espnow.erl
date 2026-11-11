@@ -48,7 +48,9 @@
 %% from its MAC), NATed out through its gateway, announced one hop deeper. A
 %% node or relay follows the first gateway or relay it hears, but never a
 %% relay that goes out by itself, nor one 4 hops deep; its receiver gets the
-%% node's messages. Frames whose first byte is 16#A5 or 16#A6 are the
+%% node's messages. A node whose gateway or relay restarted (its beacon
+%% carries a number drawn at each start) gets `down' at once, even when the
+%% restart took less than 5 s. Frames whose first byte is 16#A5 or 16#A6 are the
 %% tunnel's, and with a tunnel no `sent' result is reported.
 %% @end
 %%-----------------------------------------------------------------------------

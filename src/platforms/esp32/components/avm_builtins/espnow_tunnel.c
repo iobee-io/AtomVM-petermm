@@ -169,7 +169,12 @@ static esp_err_t tunnel_transmit(void *handle, void *buffer, size_t len)
     }
     t->tx[0] = TUNNEL_FRAME;
     memcpy(t->tx + 1, buffer, len);
+    int64_t probe_t0 = esp_timer_get_time();
     esp_err_t err = esp_now_send(to, t->tx, len + 1);
+    int64_t probe_dt = esp_timer_get_time() - probe_t0;
+    if (probe_dt > 20000) {
+        ESP_LOGW("probe114", "esp_now_send %d ms (err %d)", (int) (probe_dt / 1000), err);
+    }
     if (err == ESP_OK) {
         t->stats.tx++;
     } else if (t->stats.tx_fail++ == 0) {

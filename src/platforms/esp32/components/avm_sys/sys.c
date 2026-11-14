@@ -164,8 +164,34 @@ static void receive_events(GlobalContext *glb, TickType_t wait_ticks)
     }
 }
 
+// PROBE iobee_bee#114 (local, do not commit): is the scheduler stuck, and where?
+#include <esp_debug_helpers.h>
+static volatile bool probe_in_poll;
+static volatile int64_t probe_poll_exit_us;
+static void probe_task(void *arg)
+{
+    (void) arg;
+    bool reported = false;
+    int64_t since = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        int64_t now = esp_timer_get_time();
+        bool stalled = !probe_in_poll && probe_poll_exit_us != 0 && now - probe_poll_exit_us > 2500000;
+        if (stalled && !reported) {
+            since = probe_poll_exit_us;
+            ESP_LOGW("probe114", "scheduler stalled %d ms: all tasks", (int) ((now - since) / 1000));
+            esp_backtrace_print_all_tasks(20);
+            reported = true;
+        } else if (!stalled && reported) {
+            ESP_LOGW("probe114", "scheduler back after %d ms", (int) ((now - since) / 1000));
+            reported = false;
+        }
+    }
+}
+
 void sys_poll_events(GlobalContext *glb, int timeout_ms)
 {
+    probe_in_poll = true;
     TickType_t wait_ticks;
     if (timeout_ms < 0) {
         wait_ticks = portMAX_DELAY;
@@ -173,6 +199,8 @@ void sys_poll_events(GlobalContext *glb, int timeout_ms)
         wait_ticks = timeout_ms / portTICK_PERIOD_MS;
     }
     receive_events(glb, wait_ticks);
+    probe_in_poll = false;
+    probe_poll_exit_us = esp_timer_get_time();
 }
 
 void sys_signal(GlobalContext *glb)
@@ -230,6 +258,7 @@ const ErlNifResourceTypeInit partition_mmap_resource_type_init = {
 
 void sys_init_platform(GlobalContext *glb)
 {
+    xTaskCreatePinnedToCore(probe_task, "probe114", 4096, NULL, 10, NULL, tskNO_AFFINITY);
     struct ESP32PlatformData *platform = malloc(sizeof(struct ESP32PlatformData));
     glb->platform_data = platform;
     platform->select_thread_exit = false;

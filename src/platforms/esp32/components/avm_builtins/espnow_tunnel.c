@@ -225,6 +225,11 @@ static void hear_beacon(struct Tunnel *t, const uint8_t *from, int8_t rssi, cons
     } else {
         return;
     }
+    // #108 TEST ONLY (not for the fork): ignore the gateway, so that this
+    // node goes through a relay and the chain has two hops. Before the lock.
+    if (depth == 0) {
+        return;
+    }
     taskENTER_CRITICAL(&t->heard_lock);
     // The gateway's version 1 and 2 beacons come one after the other: the
     // second adds the session to the first.

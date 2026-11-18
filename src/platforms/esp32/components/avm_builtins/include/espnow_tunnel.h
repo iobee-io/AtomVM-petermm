@@ -60,14 +60,19 @@ enum EspNowTunnelRole
 {
     EspNowTunnelNode,
     EspNowTunnelGateway,
-    EspNowTunnelRelay
+    EspNowTunnelRelay,
+    // No tunnel: only listens for a gateway's or a relay's beacon, and says
+    // so once (EspNowTunnelHeard). For a node that went out another way and
+    // would rather come back.
+    EspNowTunnelListener
 };
 
 enum EspNowTunnelEventKind
 {
     EspNowTunnelUp,
     EspNowTunnelDown,
-    EspNowTunnelGotIp
+    EspNowTunnelGotIp,
+    EspNowTunnelHeard
 };
 
 struct EspNowTunnelEvent
@@ -75,6 +80,8 @@ struct EspNowTunnelEvent
     enum EspNowTunnelEventKind kind;
     uint8_t mac[6];
     uint8_t channel;
+    // EspNowTunnelHeard: the hops from the gateway (0 is the gateway).
+    uint8_t depth;
     esp_netif_ip_info_t ip;
 };
 

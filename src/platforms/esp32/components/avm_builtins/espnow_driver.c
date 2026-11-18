@@ -184,7 +184,8 @@ static term ip4_tuple(const esp_ip4_addr_t *addr, Heap *heap)
     return t;
 }
 
-// {espnow, tunnel, {up, GatewayMac, Channel} | down | {got_ip, {Ip, Netmask, Gateway}}}
+// {espnow, tunnel, {up, GatewayMac, Channel} | down | {got_ip, {Ip, Netmask, Gateway}}
+//                  | {heard, Mac, Depth}}
 static void send_tunnel_event(GlobalContext *glb, struct EspNowData *data, const struct EspNowTunnelEvent *event)
 {
     size_t size = TUPLE_SIZE(3) + TUPLE_SIZE(3) + term_binary_heap_size(MAC_LEN) + TUPLE_SIZE(3) + 3 * TUPLE_SIZE(4);
@@ -201,6 +202,12 @@ static void send_tunnel_event(GlobalContext *glb, struct EspNowData *data, const
             term_put_tuple_element(what, 0, globalcontext_make_atom(glb, ATOM_STR("\x2", "up")));
             term_put_tuple_element(what, 1, term_from_literal_binary(event->mac, MAC_LEN, &heap, glb));
             term_put_tuple_element(what, 2, term_from_int(event->channel));
+            break;
+        case EspNowTunnelHeard:
+            what = term_alloc_tuple(3, &heap);
+            term_put_tuple_element(what, 0, globalcontext_make_atom(glb, ATOM_STR("\x5", "heard")));
+            term_put_tuple_element(what, 1, term_from_literal_binary(event->mac, MAC_LEN, &heap, glb));
+            term_put_tuple_element(what, 2, term_from_int(event->depth));
             break;
         case EspNowTunnelGotIp: {
             term ip = term_alloc_tuple(3, &heap);
@@ -332,12 +339,18 @@ static esp_err_t add_peer(const uint8_t mac[MAC_LEN], uint8_t channel, const uin
     return esp_now_add_peer(&peer);
 }
 
-static enum EspNowTunnelRole tunnel_role(term role, term gateway_atom, term relay_atom)
+static enum EspNowTunnelRole tunnel_role(term role, GlobalContext *glb)
 {
-    if (role == gateway_atom) {
+    if (role == globalcontext_make_atom(glb, ATOM_STR("\x7", "gateway"))) {
         return EspNowTunnelGateway;
     }
-    return role == relay_atom ? EspNowTunnelRelay : EspNowTunnelNode;
+    if (role == globalcontext_make_atom(glb, ATOM_STR("\x5", "relay"))) {
+        return EspNowTunnelRelay;
+    }
+    if (role == globalcontext_make_atom(glb, ATOM_STR("\x6", "listen"))) {
+        return EspNowTunnelListener;
+    }
+    return EspNowTunnelNode;
 }
 
 static Context *espnow_create_port(GlobalContext *global, term opts)
@@ -355,8 +368,10 @@ static Context *espnow_create_port(GlobalContext *global, term opts)
     term node_atom = globalcontext_make_atom(global, ATOM_STR("\x4", "node"));
     term gateway_atom = globalcontext_make_atom(global, ATOM_STR("\x7", "gateway"));
     term relay_atom = globalcontext_make_atom(global, ATOM_STR("\x5", "relay"));
+    term listen_atom = globalcontext_make_atom(global, ATOM_STR("\x6", "listen"));
     if (!term_is_local_pid(receiver) || channel < 0
-        || (!term_is_invalid_term(tunnel_term) && tunnel_term != node_atom && tunnel_term != gateway_atom && tunnel_term != relay_atom)
+        || (!term_is_invalid_term(tunnel_term) && tunnel_term != node_atom && tunnel_term != gateway_atom && tunnel_term != relay_atom
+            && tunnel_term != listen_atom)
         || (!term_is_invalid_term(pmk) && (!term_is_binary(pmk) || term_binary_size(pmk) != ESP_NOW_KEY_LEN))) {
         ESP_LOGE(TAG, "Invalid options");
         return NULL;
@@ -409,7 +424,7 @@ static Context *espnow_create_port(GlobalContext *global, term opts)
         || (err = esp_now_register_send_cb(espnow_send_cb)) != ESP_OK
         || (err = add_peer(broadcast_mac, 0, NULL)) != ESP_OK
         || (!term_is_invalid_term(tunnel_term)
-            && (err = espnow_tunnel_start(tunnel_role(tunnel_term, gateway_atom, relay_atom), espnow_tunnel_event)) != ESP_OK)) {
+            && (err = espnow_tunnel_start(tunnel_role(tunnel_term, global), espnow_tunnel_event)) != ESP_OK)) {
         ESP_LOGE(TAG, "Failed to start ESP-NOW: %s", esp_err_to_name(err));
         teardown(data);
         return NULL;

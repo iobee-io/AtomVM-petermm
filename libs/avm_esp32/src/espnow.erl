@@ -53,6 +53,12 @@
 %% carries a number drawn at each start) gets `down' at once, even when the
 %% restart took less than 5 s. Frames whose first byte is 16#A5 or 16#A6 are the
 %% tunnel's, and with a tunnel no `sent' result is reported.
+%%
+%% `{tunnel, listen}' opens no tunnel: on the channel the radio is on (a
+%% connected STA's), it only listens for a beacon a node could follow, and
+%% the receiver gets `{espnow, tunnel, {heard, Mac, Depth}}' once, for the
+%% first one (`Depth' 0 is a gateway). For a node that went out another way
+%% and wants to know, without probing, when the tunnel is back in range.
 %% @end
 %%-----------------------------------------------------------------------------
 -module(espnow).
@@ -78,7 +84,7 @@
     {receiver, pid()}
     | {channel, channel()}
     | {pmk, key()}
-    | {tunnel, node | gateway | relay}.
+    | {tunnel, node | gateway | relay | listen}.
 %% `pmk' is the primary key that encrypts the peers' `lmk' keys.
 
 -type peer_option() :: {channel, channel()} | {lmk, key()}.
@@ -96,7 +102,9 @@ open() ->
 -spec open([open_option()]) -> {ok, port()} | {error, term()}.
 open(Options) ->
     Receiver = proplists:get_value(receiver, Options, self()),
-    try open_port({spawn, "espnow"}, [{receiver, Receiver} | proplists:delete(receiver, Options)]) of
+    try
+        open_port({spawn, "espnow"}, [{receiver, Receiver} | proplists:delete(receiver, Options)])
+    of
         Port -> {ok, Port}
     catch
         error:Reason -> {error, Reason}

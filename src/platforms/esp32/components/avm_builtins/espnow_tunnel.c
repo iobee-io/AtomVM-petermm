@@ -144,6 +144,13 @@ struct Tunnel
 
 static struct Tunnel *tunnel;
 
+// The listener (EspNowTunnelListener): no Tunnel, nothing allocated, so the
+// receive callback (Wi-Fi task) never reads anything a stop frees.
+static volatile bool listening;
+static volatile bool listen_heard;
+static espnow_tunnel_notify listen_notify;
+static uint8_t listen_mac[MAC_LEN];
+
 static const uint8_t broadcast_mac[MAC_LEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 // lwIP's output (the TCP/IP task, or a caller holding the core lock): an
@@ -212,17 +219,29 @@ static bool better_beacon(int8_t rssi, uint8_t depth, int8_t than_rssi, uint8_t 
     return rssi > than_rssi;
 }
 
+// A beacon this board can follow: a gateway's (version 1 or 2), or a relay's
+// that does not go out by `own' and is not too deep. Its depth and session.
+static bool followable_beacon(const uint8_t *own, const uint8_t *data, int len, uint8_t *depth, uint8_t *session)
+{
+    *session = 0;
+    if (len == BEACON_LEN && memcmp(data + 1, "ib\x01", 3) == 0) {
+        *depth = 0;
+        return true;
+    }
+    if (len == BEACON_V2_LEN && memcmp(data + 1, "ib\x02", 3) == 0
+        && data[5] < MAX_DEPTH && memcmp(data + 6, own, MAC_LEN) != 0) {
+        *depth = data[5];
+        *session = data[BEACON_V2_LEN - 1];
+        return true;
+    }
+    return false;
+}
+
 static void hear_beacon(struct Tunnel *t, const uint8_t *from, int8_t rssi, const uint8_t *data, int len)
 {
     uint8_t depth;
-    uint8_t session = 0;
-    if (len == BEACON_LEN && memcmp(data + 1, "ib\x01", 3) == 0) {
-        depth = 0;
-    } else if (len == BEACON_V2_LEN && memcmp(data + 1, "ib\x02", 3) == 0
-        && data[5] < MAX_DEPTH && memcmp(data + 6, t->mac, MAC_LEN) != 0) {
-        depth = data[5];
-        session = data[BEACON_V2_LEN - 1];
-    } else {
+    uint8_t session;
+    if (!followable_beacon(t->mac, data, len, &depth, &session)) {
         return;
     }
     taskENTER_CRITICAL(&t->heard_lock);
@@ -258,8 +277,28 @@ static void check_session(struct Tunnel *t, const uint8_t *data, int len)
     }
 }
 
+// The listener's: the first followable beacon, said once.
+static bool listen_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+{
+    if (data[0] != TUNNEL_BEACON) {
+        return data[0] == TUNNEL_FRAME;
+    }
+    uint8_t depth;
+    uint8_t session;
+    if (!listen_heard && followable_beacon(listen_mac, data, len, &depth, &session)) {
+        listen_heard = true;
+        struct EspNowTunnelEvent event = { .kind = EspNowTunnelHeard, .channel = data[4], .depth = depth };
+        memcpy(event.mac, info->src_addr, MAC_LEN);
+        listen_notify(&event);
+    }
+    return true;
+}
+
 bool espnow_tunnel_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
+    if (listening && len >= 1) {
+        return listen_receive(info, data, len);
+    }
     struct Tunnel *t = tunnel;
     if (t == NULL || !t->running || len < 1 || (data[0] != TUNNEL_BEACON && data[0] != TUNNEL_FRAME)) {
         return false;
@@ -589,8 +628,19 @@ static void tunnel_free(struct Tunnel *t)
 esp_err_t espnow_tunnel_start(enum EspNowTunnelRole role, espnow_tunnel_notify notify)
 {
     uint32_t version;
-    if (tunnel != NULL) {
+    if (tunnel != NULL || listening) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (role == EspNowTunnelListener) {
+        esp_err_t err = esp_wifi_get_mac(WIFI_IF_STA, listen_mac);
+        if (err != ESP_OK) {
+            return err;
+        }
+        listen_notify = notify;
+        listen_heard = false;
+        listening = true;
+        ESP_LOGI(TAG, "Listening for a tunnel");
+        return ESP_OK;
     }
     if (esp_now_get_version(&version) != ESP_OK || version < 2) {
         ESP_LOGE(TAG, "The tunnel needs ESP-NOW v2");
@@ -651,6 +701,11 @@ esp_err_t espnow_tunnel_start(enum EspNowTunnelRole role, espnow_tunnel_notify n
 
 void espnow_tunnel_stop(void)
 {
+    if (listening) {
+        listening = false;
+        ESP_LOGI(TAG, "Stopped listening for a tunnel");
+        return;
+    }
     struct Tunnel *t = tunnel;
     if (t == NULL) {
         return;

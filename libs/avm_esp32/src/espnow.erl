@@ -33,6 +33,33 @@
 %% The receiver (the caller of `open/1' unless `{receiver, Pid}') gets
 %% `{espnow, rx, Mac, Data, #{rssi := Rssi}}' for each frame. `send/3'
 %% returns once the frame is out.
+%%
+%% With `{tunnel, Role}', the port also carries IP: a netif of its own, whose
+%% Ethernet frames travel in ESP-NOW frames (ESP-NOW v2, ESP-IDF 5.4 or newer).
+%% A `gateway', on a board with a network, is 10.42.0.1/24, leases addresses
+%% to the nodes, NATs them out through its default route (it needs
+%% `CONFIG_LWIP_IPV4_NAPT') and announces itself on its channel. A `node' hops
+%% the channels until it hears a gateway, stays on its channel and asks it for
+%% an address. The receiver gets `{espnow, tunnel, {up, GatewayMac, Channel}}',
+%% `{espnow, tunnel, {got_ip, {Address, Netmask, Gateway}}}', and
+%% `{espnow, tunnel, down}' when the gateway has not been heard for 5 s (the
+%% node then hops again). A `relay' goes out like a node and, with an
+%% address, is a gateway to nodes farther away: 10.42.N.0/24 of its own (N
+%% from its MAC), NATed out through its gateway, announced one hop deeper. A
+%% node or relay follows the one closest to the gateway it hears (fewer hops,
+%% then the stronger signal), but never a relay that goes out by itself, nor
+%% one 4 hops deep. A node whose gateway or relay restarted (its beacon
+%% carries a number drawn at each start) gets `down' at once, even when the
+%% restart took less than 5 s. Frames whose first byte is 16#A5 or 16#A6 are
+%% the tunnel's. With a tunnel, the radio's send results are the tunnel's:
+%% `send/3' returns `ok' once the radio took the frame, not once it was
+%% acknowledged.
+%%
+%% `{tunnel, listen}' opens no tunnel: on the channel the radio is on (a
+%% connected STA's), it only listens for a beacon a node could follow, and
+%% the receiver gets `{espnow, tunnel, {heard, Mac, Depth}}' once, for the
+%% first one (`Depth' 0 is a gateway). For a node that went out another way
+%% and wants to know, without probing, when the tunnel is back in range.
 %% @end
 %%-----------------------------------------------------------------------------
 -module(espnow).
@@ -57,7 +84,8 @@
 -type open_option() ::
     {receiver, pid()}
     | {channel, channel()}
-    | {pmk, key()}.
+    | {pmk, key()}
+    | {tunnel, node | gateway | relay | listen}.
 %% `pmk' is the primary key that encrypts the peers' `lmk' keys.
 
 -type peer_option() :: {channel, channel()} | {lmk, key()}.

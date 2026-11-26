@@ -24,7 +24,9 @@
 start() ->
     Largest = erlang:system_info(esp32_internal_largest_free_block),
     Minimum = erlang:system_info(esp32_internal_minimum_free_size),
+    Free = erlang:system_info(esp32_internal_free_size),
     true = is_integer(Largest) andalso Largest > 0,
     true = is_integer(Minimum) andalso Minimum > 0,
     true = Minimum =< erlang:system_info(esp32_minimum_free_size),
+    true = Largest =< Free andalso Free =< erlang:system_info(esp32_free_heap_size),
     ok.

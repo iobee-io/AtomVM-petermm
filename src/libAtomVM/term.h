@@ -2124,12 +2124,14 @@ static inline term term_create_uninitialized_binary(size_t size, Heap *heap, Glo
  * @param size size of binary data buffer.
  * @param heap the heap to allocate the binary in
  * @param glb the global context as refc binaries are global
- * @return a term pointing to the boxed binary pointer.
+ * @return a term pointing to the boxed binary pointer, or an invalid term if the binary could not be allocated.
  */
 static inline term term_from_literal_binary(const void *data, size_t size, Heap *heap, GlobalContext *glb)
 {
     term binary = term_create_uninitialized_binary(size, heap, glb);
-    memcpy((void *) term_binary_data(binary), data, size);
+    if (LIKELY(!term_is_invalid_term(binary))) {
+        memcpy((void *) term_binary_data(binary), data, size);
+    }
     return binary;
 }
 

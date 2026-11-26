@@ -471,6 +471,7 @@ process_info(_Pid, _Key) ->
 %%      <li><b>esp32_minimum_free_size</b> the smallest number of free bytes in the ESP32 heap since boot (integer)</li>
 %%      <li><b>esp32_internal_largest_free_block</b> the largest contiguous free bytes in internal RAM, without PSRAM (integer)</li>
 %%      <li><b>esp32_internal_minimum_free_size</b> the smallest number of free bytes in internal RAM since boot (integer)</li>
+%%      <li><b>esp32_internal_free_size</b> the free bytes in internal RAM, without PSRAM (integer)</li>
 %%      <li><b>esp32_chip_info</b> Details about the model and capabilities of the ESP32 device (map)</li>
 %% </ul>
 %% The following keys are supported on the STM32 platform:
